@@ -14,6 +14,16 @@ app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 app.use(morgan("dev"));
 
+// Home Assistant Ingress can forward requests with a path prefix.
+// Normalize URLs so static files and routes work both with and without ingress.
+app.use((req, _res, next) => {
+  const ingressPath = req.header("x-ingress-path");
+  if (ingressPath && req.url.startsWith(ingressPath)) {
+    req.url = req.url.slice(ingressPath.length) || "/";
+  }
+  next();
+});
+
 let optionsCache = null;
 let sessionCache = {
   checkedAt: 0,
