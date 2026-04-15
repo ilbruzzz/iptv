@@ -1,0 +1,32 @@
+name: "IPTV Premium"
+version: "0.1.0"
+slug: "iptv_premium"
+description: "Advanced IPTV add-on with Xtream backend and premium UI"
+url: "https://example.com/iptv_premium"
+arch:
+  - amd64
+  - aarch64
+  - armv7
+startup: services
+boot: auto
+init: false
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:television-play
+panel_title: IPTV Premium
+map:
+  - addon_config:rw
+ports:
+  8099/tcp: null
+ports_description:
+  8099/tcp: "IPTV Premium web interface and API"
+options:
+  xtream_url: ""
+  xtream_username: ""
+  xtream_password: ""
+  stream_format: "m3u8"
+schema:
+  xtream_url: str
+  xtream_username: str
+  xtream_password: password
+  stream_format: list(m3u8|ts)

@@ -1,0 +1,17 @@
+{
+  "name": "iptv-premium-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Xtream proxy backend for Home Assistant IPTV Premium add-on",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "axios": "^1.9.0",
+    "bashio": "^0.16.2",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "morgan": "^1.10.0"
+  }
+}
