@@ -64,6 +64,7 @@
             <button data-section="live" class="nav-item w-full rounded-xl px-4 py-3 text-left transition-all duration-300">Canali Live</button>
             <button data-section="vod" class="nav-item w-full rounded-xl px-4 py-3 text-left transition-all duration-300">Film</button>
             <button data-section="series" class="nav-item w-full rounded-xl px-4 py-3 text-left transition-all duration-300">Serie TV</button>
+            <button data-section="settings" class="nav-item w-full rounded-xl px-4 py-3 text-left transition-all duration-300">Impostazioni</button>
           </nav>
         </aside>
 
@@ -94,7 +95,62 @@
               <button data-section="live" class="nav-item rounded-xl px-4 py-3 text-left transition-all duration-300">Canali Live</button>
               <button data-section="vod" class="nav-item rounded-xl px-4 py-3 text-left transition-all duration-300">Film</button>
               <button data-section="series" class="nav-item rounded-xl px-4 py-3 text-left transition-all duration-300">Serie TV</button>
+              <button data-section="settings" class="nav-item rounded-xl px-4 py-3 text-left transition-all duration-300">Impostazioni</button>
             </nav>
+          </section>
+
+          <section id="settingsPanel" class="glass hidden rounded-3xl p-5 shadow-soft md:p-6">
+            <div class="mb-4 flex items-center justify-between">
+              <h3 class="text-lg font-semibold">Impostazioni Add-on</h3>
+              <p id="settingsStatus" class="text-xs text-slate-300">Caricamento...</p>
+            </div>
+
+            <form id="settingsForm" class="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <label class="space-y-1">
+                <span class="text-xs uppercase tracking-[0.18em] text-slate-400">Xtream URL</span>
+                <input id="xtreamUrl" class="w-full rounded-xl border border-white/15 bg-black/20 px-3 py-2 outline-none transition-all duration-300 focus:border-premium-accent/70" />
+              </label>
+              <label class="space-y-1">
+                <span class="text-xs uppercase tracking-[0.18em] text-slate-400">Username</span>
+                <input id="xtreamUsername" class="w-full rounded-xl border border-white/15 bg-black/20 px-3 py-2 outline-none transition-all duration-300 focus:border-premium-accent/70" />
+              </label>
+              <label class="space-y-1 lg:col-span-2">
+                <span class="text-xs uppercase tracking-[0.18em] text-slate-400">Password (lascia ******** per non cambiare)</span>
+                <input id="xtreamPassword" type="password" class="w-full rounded-xl border border-white/15 bg-black/20 px-3 py-2 outline-none transition-all duration-300 focus:border-premium-accent/70" />
+              </label>
+              <label class="space-y-1">
+                <span class="text-xs uppercase tracking-[0.18em] text-slate-400">Formato Live</span>
+                <select id="playbackLiveFormat" class="w-full rounded-xl border border-white/15 bg-black/20 px-3 py-2 outline-none transition-all duration-300 focus:border-premium-accent/70">
+                  <option value="m3u8">m3u8</option>
+                  <option value="ts">ts</option>
+                </select>
+              </label>
+              <label class="space-y-1">
+                <span class="text-xs uppercase tracking-[0.18em] text-slate-400">Formato VOD</span>
+                <select id="playbackVodFormat" class="w-full rounded-xl border border-white/15 bg-black/20 px-3 py-2 outline-none transition-all duration-300 focus:border-premium-accent/70">
+                  <option value="mp4">mp4</option>
+                  <option value="mkv">mkv</option>
+                  <option value="m3u8">m3u8</option>
+                </select>
+              </label>
+              <label class="space-y-2">
+                <span class="text-xs uppercase tracking-[0.18em] text-slate-400">Volume default</span>
+                <input id="playbackVolume" type="range" min="0" max="1" step="0.05" class="w-full accent-premium-accent" />
+              </label>
+              <label class="flex items-center gap-2 pt-4">
+                <input id="playbackAutoplay" type="checkbox" class="h-4 w-4 rounded accent-premium-accent" />
+                <span class="text-sm text-slate-300">Autoplay</span>
+              </label>
+              <label class="flex items-center gap-2 pt-4">
+                <input id="playbackMuted" type="checkbox" class="h-4 w-4 rounded accent-premium-accent" />
+                <span class="text-sm text-slate-300">Muted all'avvio</span>
+              </label>
+              <div class="lg:col-span-2">
+                <button type="submit" class="rounded-xl border border-premium-accent/40 bg-premium-accent/20 px-5 py-2 text-sm font-semibold transition-all duration-300 hover:bg-premium-accent/35">
+                  Salva impostazioni
+                </button>
+              </div>
+            </form>
           </section>
 
           <section class="space-y-4">
@@ -111,6 +167,17 @@
       </div>
     </div>
 
+    <div id="playerModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/80 p-4">
+      <div class="w-full max-w-5xl overflow-hidden rounded-2xl border border-white/10 bg-black shadow-soft">
+        <div class="flex items-center justify-between border-b border-white/10 px-4 py-3">
+          <h3 id="playerTitle" class="text-sm font-semibold">Player</h3>
+          <button id="closePlayer" class="rounded-lg border border-white/15 px-3 py-1 text-xs text-slate-200 transition-all duration-300 hover:bg-white/10">Chiudi</button>
+        </div>
+        <video id="videoPlayer" class="h-[65vh] w-full bg-black" controls playsinline></video>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
     <script src="./app.js"></script>
   </body>
 </html>

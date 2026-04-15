@@ -3,6 +3,24 @@ const heroDescription = document.getElementById("heroDescription");
 const gridTitle = document.getElementById("gridTitle");
 const apiStatus = document.getElementById("apiStatus");
 const posterGrid = document.getElementById("posterGrid");
+const settingsPanel = document.getElementById("settingsPanel");
+const settingsStatus = document.getElementById("settingsStatus");
+const settingsForm = document.getElementById("settingsForm");
+const playerModal = document.getElementById("playerModal");
+const closePlayerBtn = document.getElementById("closePlayer");
+const playerTitle = document.getElementById("playerTitle");
+const videoPlayer = document.getElementById("videoPlayer");
+
+let currentHls = null;
+let appSettings = {
+  playback: {
+    autoplay: true,
+    muted: false,
+    volume: 0.8,
+    liveFormat: "m3u8",
+    vodFormat: "mp4"
+  }
+};
 
 const sectionMeta = {
   home: {
@@ -11,15 +29,19 @@ const sectionMeta = {
   },
   live: {
     title: "Canali Live",
-    description: "Caricamento categorie live e canali dal backend Xtream."
+    description: "Click su un canale per avviare il player integrato."
   },
   vod: {
     title: "Film",
-    description: "Caricamento catalogo film VOD con metadati e locandine."
+    description: "Seleziona un film per riprodurlo nel player."
   },
   series: {
     title: "Serie TV",
-    description: "Caricamento serie con struttura stagioni ed episodi."
+    description: "Le card aprono il primo episodio disponibile."
+  },
+  settings: {
+    title: "Impostazioni",
+    description: "Modifica credenziali Xtream e parametri base di riproduzione."
   }
 };
 
@@ -33,7 +55,7 @@ function createSkeletonCards() {
   const cards = Array.from({ length: 12 }).map((_, idx) => {
     const glow = idx % 3 === 0 ? "bg-premium-accent/20" : "bg-white/5";
     return `
-      <article class="group overflow-hidden rounded-2xl border border-white/10 bg-premium-800/70 transition-all duration-300 hover:-translate-y-1 hover:border-premium-accent/50 hover:shadow-glass">
+      <article class="group overflow-hidden rounded-2xl border border-white/10 bg-premium-800/70 transition-all duration-300">
         <div class="aspect-[2/3] ${glow} relative">
           <div class="absolute inset-0 bg-gradient-to-t from-black/45 to-transparent"></div>
           <div class="absolute bottom-3 left-3 right-3 h-2 rounded-full bg-white/20"></div>
@@ -61,16 +83,6 @@ function setActiveSection(section) {
   });
 }
 
-function flattenCategoryItems(payload) {
-  const categories = payload?.categories || [];
-  return categories.flatMap((category) =>
-    (category.items || []).map((item) => ({
-      ...item,
-      _categoryName: category.name || "Uncategorized"
-    }))
-  );
-}
-
 function escapeHtml(text) {
   return String(text ?? "")
     .replaceAll("&", "&amp;")
@@ -80,8 +92,81 @@ function escapeHtml(text) {
     .replaceAll("'", "&#39;");
 }
 
+function resolvePlaybackTarget(section, item) {
+  if (section === "series") {
+    const firstEpisode = item.seasons?.[0]?.episodes?.[0];
+    return {
+      url: firstEpisode?.streamUrl || null,
+      subtitle: firstEpisode ? `S${item.seasons?.[0]?.seasonNumber || 1}E${firstEpisode.episodeNumber || 1}` : item._categoryName
+    };
+  }
+  return { url: item.streamUrl || null, subtitle: item._categoryName };
+}
+
+function normalizeItems(section, payload) {
+  const categories = payload?.categories || [];
+  return categories.flatMap((category) =>
+    (category.items || []).map((item) => {
+      const playback = resolvePlaybackTarget(section, item);
+      return {
+        ...item,
+        _categoryName: category.name || "Uncategorized",
+        _playbackUrl: playback.url,
+        _playbackSubtitle: playback.subtitle || category.name || "Catalogo"
+      };
+    })
+  );
+}
+
+function cleanupPlayer() {
+  if (currentHls) {
+    currentHls.destroy();
+    currentHls = null;
+  }
+  videoPlayer.pause();
+  videoPlayer.removeAttribute("src");
+  videoPlayer.load();
+}
+
+function closePlayer() {
+  playerModal.classList.add("hidden");
+  playerModal.classList.remove("flex");
+  cleanupPlayer();
+}
+
+function openPlayer(item) {
+  const streamUrl = item._playbackUrl;
+  if (!streamUrl) {
+    alert("Nessun flusso disponibile per questo contenuto.");
+    return;
+  }
+
+  cleanupPlayer();
+  playerTitle.textContent = item.title || item.name || "Player";
+  playerModal.classList.remove("hidden");
+  playerModal.classList.add("flex");
+
+  const absoluteUrl = new URL(streamUrl, window.location.href).toString();
+  const isHls = absoluteUrl.includes(".m3u8") || absoluteUrl.includes("ext=m3u8");
+  videoPlayer.autoplay = Boolean(appSettings.playback?.autoplay);
+  videoPlayer.muted = Boolean(appSettings.playback?.muted);
+  videoPlayer.volume = Number(appSettings.playback?.volume ?? 0.8);
+
+  if (isHls && window.Hls?.isSupported()) {
+    currentHls = new window.Hls();
+    currentHls.loadSource(absoluteUrl);
+    currentHls.attachMedia(videoPlayer);
+  } else {
+    videoPlayer.src = absoluteUrl;
+  }
+
+  if (videoPlayer.autoplay) {
+    videoPlayer.play().catch(() => {});
+  }
+}
+
 function renderMediaCards(section, payload) {
-  const items = flattenCategoryItems(payload).slice(0, 24);
+  const items = normalizeItems(section, payload).slice(0, 36);
   if (!items.length) {
     posterGrid.innerHTML = `
       <div class="col-span-full glass rounded-2xl p-6 text-center text-slate-300">
@@ -91,19 +176,14 @@ function renderMediaCards(section, payload) {
     return;
   }
 
-  const cards = items.map((item) => {
+  const cards = items.map((item, index) => {
     const title = item.title || item.name || `Item ${item.id || ""}`;
-    const subtitle = item._categoryName || "Catalogo";
+    const subtitle = item._playbackSubtitle || item._categoryName || "Catalogo";
     const poster = item.poster || item.icon || null;
-    const fallbackTag =
-      section === "live"
-        ? "LIVE"
-        : section === "vod"
-          ? "FILM"
-          : "SERIE";
+    const fallbackTag = section === "live" ? "LIVE" : section === "vod" ? "FILM" : "SERIE";
 
     return `
-      <article class="group overflow-hidden rounded-2xl border border-white/10 bg-premium-800/70 transition-all duration-300 hover:-translate-y-1 hover:border-premium-accent/50 hover:shadow-glass">
+      <button data-item-index="${index}" class="media-card group overflow-hidden rounded-2xl border border-white/10 bg-premium-800/70 text-left transition-all duration-300 hover:-translate-y-1 hover:border-premium-accent/50 hover:shadow-glass">
         <div class="relative aspect-[2/3]">
           ${
             poster
@@ -119,11 +199,18 @@ function renderMediaCards(section, payload) {
           <h4 class="line-clamp-2 text-sm font-semibold text-slate-100">${escapeHtml(title)}</h4>
           <p class="text-xs text-slate-400">${escapeHtml(item.year || item.releaseDate || "")}</p>
         </div>
-      </article>
+      </button>
     `;
   });
 
   posterGrid.innerHTML = cards.join("");
+  const clickItems = Array.from(document.querySelectorAll(".media-card"));
+  clickItems.forEach((card) => {
+    card.addEventListener("click", () => {
+      const idx = Number(card.dataset.itemIndex);
+      openPlayer(items[idx]);
+    });
+  });
 }
 
 async function fetchSectionData(section) {
@@ -131,6 +218,11 @@ async function fetchSectionData(section) {
   if (!endpoint) {
     apiStatus.textContent = "UI ready";
     apiStatus.className = "mt-1 text-base font-medium text-emerald-300";
+    posterGrid.innerHTML = `
+      <div class="col-span-full glass rounded-2xl p-6 text-center text-slate-300">
+        Seleziona una libreria per vedere i contenuti e iniziare la riproduzione.
+      </div>
+    `;
     return;
   }
 
@@ -156,6 +248,76 @@ async function fetchSectionData(section) {
     console.error(`[${section.toUpperCase()}] fetch error:`, error);
     apiStatus.textContent = "Errore API";
     apiStatus.className = "mt-1 text-base font-medium text-rose-300";
+    posterGrid.innerHTML = `
+      <div class="col-span-full glass rounded-2xl p-6 text-center text-rose-300">
+        Errore caricamento API: ${escapeHtml(error.message)}
+      </div>
+    `;
+  }
+}
+
+function fillSettingsForm(settings) {
+  document.getElementById("xtreamUrl").value = settings.xtream_url || "";
+  document.getElementById("xtreamUsername").value = settings.xtream_username || "";
+  document.getElementById("xtreamPassword").value = settings.xtream_password || "********";
+  document.getElementById("playbackLiveFormat").value = settings.playback?.liveFormat || "m3u8";
+  document.getElementById("playbackVodFormat").value = settings.playback?.vodFormat || "mp4";
+  document.getElementById("playbackVolume").value = Number(settings.playback?.volume ?? 0.8);
+  document.getElementById("playbackAutoplay").checked = Boolean(settings.playback?.autoplay);
+  document.getElementById("playbackMuted").checked = Boolean(settings.playback?.muted);
+}
+
+async function loadSettings() {
+  settingsStatus.textContent = "Caricamento...";
+  try {
+    const response = await fetch(new URL("api/settings", window.location.href), {
+      headers: { Accept: "application/json" }
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const settings = await response.json();
+    appSettings = settings;
+    fillSettingsForm(settings);
+    settingsStatus.textContent = "Impostazioni pronte";
+  } catch (error) {
+    settingsStatus.textContent = `Errore: ${error.message}`;
+  }
+}
+
+async function saveSettings(event) {
+  event.preventDefault();
+  settingsStatus.textContent = "Salvataggio...";
+  const payload = {
+    xtream_url: document.getElementById("xtreamUrl").value.trim(),
+    xtream_username: document.getElementById("xtreamUsername").value.trim(),
+    xtream_password: document.getElementById("xtreamPassword").value,
+    playback: {
+      liveFormat: document.getElementById("playbackLiveFormat").value,
+      vodFormat: document.getElementById("playbackVodFormat").value,
+      volume: Number(document.getElementById("playbackVolume").value),
+      autoplay: document.getElementById("playbackAutoplay").checked,
+      muted: document.getElementById("playbackMuted").checked
+    }
+  };
+
+  try {
+    const response = await fetch(new URL("api/settings", window.location.href), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const body = await response.json();
+    if (!response.ok) {
+      throw new Error(body.error || `HTTP ${response.status}`);
+    }
+    appSettings = body.settings;
+    fillSettingsForm(body.settings);
+    settingsStatus.textContent = "Salvato con successo";
+    apiStatus.textContent = "Online";
+    apiStatus.className = "mt-1 text-base font-medium text-emerald-300";
+  } catch (error) {
+    settingsStatus.textContent = `Errore salvataggio: ${error.message}`;
   }
 }
 
@@ -164,6 +326,14 @@ function handleSection(section) {
   gridTitle.textContent = meta.title;
   heroDescription.textContent = meta.description;
   setActiveSection(section);
+  settingsPanel.classList.toggle("hidden", section !== "settings");
+
+  if (section === "settings") {
+    posterGrid.innerHTML = "";
+    loadSettings();
+    return;
+  }
+
   createSkeletonCards();
   fetchSectionData(section);
 }
@@ -171,6 +341,12 @@ function handleSection(section) {
 navItems.forEach((btn) => {
   btn.addEventListener("click", () => handleSection(btn.dataset.section));
 });
+settingsForm.addEventListener("submit", saveSettings);
+closePlayerBtn.addEventListener("click", closePlayer);
+playerModal.addEventListener("click", (event) => {
+  if (event.target === playerModal) {
+    closePlayer();
+  }
+});
 
-createSkeletonCards();
 handleSection("home");
