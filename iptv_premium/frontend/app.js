@@ -10,6 +10,8 @@ const playerModal = document.getElementById("playerModal");
 const closePlayerBtn = document.getElementById("closePlayer");
 const playerTitle = document.getElementById("playerTitle");
 const videoPlayer = document.getElementById("videoPlayer");
+const epgPanel = document.getElementById("epgPanel");
+const epgList = document.getElementById("epgList");
 
 let currentHls = null;
 let appSettings = {
@@ -103,19 +105,23 @@ function resolvePlaybackTarget(section, item) {
   return { url: item.streamUrl || null, subtitle: item._categoryName };
 }
 
-function normalizeItems(section, payload) {
+function normalizeCategories(section, payload) {
   const categories = payload?.categories || [];
-  return categories.flatMap((category) =>
-    (category.items || []).map((item) => {
-      const playback = resolvePlaybackTarget(section, item);
-      return {
-        ...item,
-        _categoryName: category.name || "Uncategorized",
-        _playbackUrl: playback.url,
-        _playbackSubtitle: playback.subtitle || category.name || "Catalogo"
-      };
-    })
-  );
+  return categories
+    .map((category) => ({
+      id: category.id,
+      name: category.name || "Uncategorized",
+      items: (category.items || []).map((item) => {
+        const playback = resolvePlaybackTarget(section, item);
+        return {
+          ...item,
+          _categoryName: category.name || "Uncategorized",
+          _playbackUrl: playback.url,
+          _playbackSubtitle: playback.subtitle || category.name || "Catalogo"
+        };
+      })
+    }))
+    .filter((category) => category.items.length > 0);
 }
 
 function cleanupPlayer() {
@@ -128,9 +134,48 @@ function cleanupPlayer() {
   videoPlayer.load();
 }
 
+function renderEpgListings(listings) {
+  if (!listings?.length) {
+    epgList.innerHTML = `<p class="text-slate-400">Nessun dato EPG disponibile.</p>`;
+    return;
+  }
+  epgList.innerHTML = listings
+    .map((item) => {
+      const start = item.start ? new Date(item.start.replace(" ", "T")) : null;
+      const end = item.end ? new Date(item.end.replace(" ", "T")) : null;
+      const range = start && end ? `${start.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} - ${end.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Orario N/D";
+      return `
+        <div class="rounded-lg border border-white/10 bg-black/30 px-3 py-2">
+          <p class="text-[11px] uppercase tracking-[0.14em] text-slate-400">${escapeHtml(range)}</p>
+          <p class="font-medium text-slate-100">${escapeHtml(item.title)}</p>
+          ${item.description ? `<p class="mt-1 text-xs text-slate-300">${escapeHtml(item.description)}</p>` : ""}
+        </div>
+      `;
+    })
+    .join("");
+}
+
+async function loadEpgForLive(streamId) {
+  epgPanel.classList.remove("hidden");
+  epgList.innerHTML = `<p class="text-slate-400">Caricamento EPG...</p>`;
+  try {
+    const response = await fetch(new URL(`api/live/epg/${streamId}?limit=10`, window.location.href), {
+      headers: { Accept: "application/json" }
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const payload = await response.json();
+    renderEpgListings(payload.listings || []);
+  } catch (error) {
+    epgList.innerHTML = `<p class="text-rose-300">Errore EPG: ${escapeHtml(error.message)}</p>`;
+  }
+}
+
 function closePlayer() {
   playerModal.classList.add("hidden");
   playerModal.classList.remove("flex");
+  epgPanel.classList.add("hidden");
   cleanupPlayer();
 }
 
@@ -153,9 +198,17 @@ function openPlayer(item) {
   videoPlayer.volume = Number(appSettings.playback?.volume ?? 0.8);
 
   if (isHls && window.Hls?.isSupported()) {
-    currentHls = new window.Hls();
+    currentHls = new window.Hls({
+      enableWorker: true,
+      lowLatencyMode: true
+    });
     currentHls.loadSource(absoluteUrl);
     currentHls.attachMedia(videoPlayer);
+    currentHls.on(window.Hls.Events.ERROR, (_event, data) => {
+      if (data?.fatal) {
+        console.error("HLS fatal error:", data);
+      }
+    });
   } else {
     videoPlayer.src = absoluteUrl;
   }
@@ -163,11 +216,17 @@ function openPlayer(item) {
   if (videoPlayer.autoplay) {
     videoPlayer.play().catch(() => {});
   }
+
+  if (item._section === "live" && item.id) {
+    loadEpgForLive(item.id);
+  } else {
+    epgPanel.classList.add("hidden");
+  }
 }
 
 function renderMediaCards(section, payload) {
-  const items = normalizeItems(section, payload).slice(0, 36);
-  if (!items.length) {
+  const categories = normalizeCategories(section, payload);
+  if (!categories.length) {
     posterGrid.innerHTML = `
       <div class="col-span-full glass rounded-2xl p-6 text-center text-slate-300">
         Nessun contenuto disponibile per questa sezione.
@@ -176,39 +235,55 @@ function renderMediaCards(section, payload) {
     return;
   }
 
-  const cards = items.map((item, index) => {
-    const title = item.title || item.name || `Item ${item.id || ""}`;
-    const subtitle = item._playbackSubtitle || item._categoryName || "Catalogo";
-    const poster = item.poster || item.icon || null;
-    const fallbackTag = section === "live" ? "LIVE" : section === "vod" ? "FILM" : "SERIE";
+  posterGrid.className = "space-y-6";
+  posterGrid.innerHTML = categories
+    .map((category, catIndex) => {
+      const cards = category.items
+        .map((rawItem, itemIndex) => {
+          const item = { ...rawItem, _section: section };
+          const title = item.title || item.name || `Item ${item.id || ""}`;
+          const subtitle = item._playbackSubtitle || item._categoryName || "Catalogo";
+          const poster = item.poster || item.icon || null;
+          const fallbackTag = section === "live" ? "LIVE" : section === "vod" ? "FILM" : "SERIE";
+          const isLive = section === "live";
+          return `
+            <button data-cat-index="${catIndex}" data-item-index="${itemIndex}" class="media-card group relative w-44 shrink-0 overflow-hidden rounded-2xl border border-white/10 bg-premium-800/70 text-left transition-all duration-300 hover:-translate-y-1 hover:border-premium-accent/50 hover:shadow-glass">
+              <div class="relative aspect-[2/3]">
+                ${
+                  poster
+                    ? `<img src="api/image?url=${encodeURIComponent(poster)}" alt="${escapeHtml(title)}" class="h-full w-full object-cover" loading="lazy" />`
+                    : `<div class="flex h-full w-full items-center justify-center bg-gradient-to-br from-premium-700 to-premium-600 text-xs tracking-[0.22em] text-slate-300">${fallbackTag}</div>`
+                }
+                <div class="absolute inset-0 bg-gradient-to-t from-black/75 via-black/15 to-transparent opacity-90"></div>
+                <div class="absolute bottom-2 left-2 rounded-md border border-white/15 bg-black/45 px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-200">
+                  ${escapeHtml(subtitle)}
+                </div>
+                ${isLive ? `<div class="absolute right-2 top-2 rounded-md bg-rose-600/90 px-2 py-0.5 text-[10px] font-semibold tracking-[0.12em] text-white">LIVE</div>` : ""}
+              </div>
+              <div class="space-y-1 p-3">
+                <h4 class="line-clamp-2 text-sm font-semibold text-slate-100">${escapeHtml(title)}</h4>
+                <p class="text-xs text-slate-400">${escapeHtml(item.year || item.releaseDate || "")}</p>
+              </div>
+            </button>
+          `;
+        })
+        .join("");
+      return `
+        <section class="space-y-2">
+          <h4 class="px-1 text-sm font-semibold uppercase tracking-[0.14em] text-slate-300">${escapeHtml(category.name)}</h4>
+          <div class="flex gap-3 overflow-x-auto pb-2 pr-2">${cards}</div>
+        </section>
+      `;
+    })
+    .join("");
 
-    return `
-      <button data-item-index="${index}" class="media-card group overflow-hidden rounded-2xl border border-white/10 bg-premium-800/70 text-left transition-all duration-300 hover:-translate-y-1 hover:border-premium-accent/50 hover:shadow-glass">
-        <div class="relative aspect-[2/3]">
-          ${
-            poster
-              ? `<img src="api/image?url=${encodeURIComponent(poster)}" alt="${escapeHtml(title)}" class="h-full w-full object-cover" loading="lazy" />`
-              : `<div class="flex h-full w-full items-center justify-center bg-gradient-to-br from-premium-700 to-premium-600 text-xs tracking-[0.22em] text-slate-300">${fallbackTag}</div>`
-          }
-          <div class="absolute inset-0 bg-gradient-to-t from-black/75 via-black/15 to-transparent opacity-90"></div>
-          <div class="absolute bottom-2 left-2 rounded-md border border-white/15 bg-black/45 px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-200">
-            ${escapeHtml(subtitle)}
-          </div>
-        </div>
-        <div class="space-y-1 p-3">
-          <h4 class="line-clamp-2 text-sm font-semibold text-slate-100">${escapeHtml(title)}</h4>
-          <p class="text-xs text-slate-400">${escapeHtml(item.year || item.releaseDate || "")}</p>
-        </div>
-      </button>
-    `;
-  });
-
-  posterGrid.innerHTML = cards.join("");
   const clickItems = Array.from(document.querySelectorAll(".media-card"));
   clickItems.forEach((card) => {
     card.addEventListener("click", () => {
-      const idx = Number(card.dataset.itemIndex);
-      openPlayer(items[idx]);
+      const catIdx = Number(card.dataset.catIndex);
+      const itemIdx = Number(card.dataset.itemIndex);
+      const item = { ...categories[catIdx].items[itemIdx], _section: section };
+      openPlayer(item);
     });
   });
 }
@@ -218,6 +293,7 @@ async function fetchSectionData(section) {
   if (!endpoint) {
     apiStatus.textContent = "UI ready";
     apiStatus.className = "mt-1 text-base font-medium text-emerald-300";
+    posterGrid.className = "grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6";
     posterGrid.innerHTML = `
       <div class="col-span-full glass rounded-2xl p-6 text-center text-slate-300">
         Seleziona una libreria per vedere i contenuti e iniziare la riproduzione.
@@ -329,11 +405,13 @@ function handleSection(section) {
   settingsPanel.classList.toggle("hidden", section !== "settings");
 
   if (section === "settings") {
+    posterGrid.className = "grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6";
     posterGrid.innerHTML = "";
     loadSettings();
     return;
   }
 
+  posterGrid.className = "grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6";
   createSkeletonCards();
   fetchSectionData(section);
 }

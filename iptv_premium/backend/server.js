@@ -358,6 +358,38 @@ app.get("/api/live", async (_req, res, next) => {
   }
 });
 
+app.get("/api/live/epg/:streamId", async (req, res, next) => {
+  try {
+    await ensureAuthenticated();
+    const streamId = req.params.streamId;
+    const limit = Number(req.query.limit || 8);
+    const raw = await xtreamPlayerApi("get_short_epg", {
+      stream_id: streamId,
+      limit: Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 24) : 8
+    });
+
+    const listings = (raw?.epg_listings || []).map((entry) => {
+      const titleDecoded = entry.title ? Buffer.from(entry.title, "base64").toString("utf-8") : "";
+      const descriptionDecoded = entry.description ? Buffer.from(entry.description, "base64").toString("utf-8") : "";
+      return {
+        id: entry.id || null,
+        title: titleDecoded || "Programma",
+        description: descriptionDecoded || "",
+        start: entry.start || null,
+        end: entry.end || null,
+        hasArchive: entry.has_archive || 0
+      };
+    });
+
+    res.json({
+      streamId: String(streamId),
+      listings
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/vod", async (_req, res, next) => {
   try {
     const cfg = requireConfig();
