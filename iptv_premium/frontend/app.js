@@ -14,62 +14,32 @@ const epgPanel = document.getElementById("epgPanel");
 const epgList = document.getElementById("epgList");
 
 let currentHls = null;
-let appSettings = {
-  playback: {
-    autoplay: true,
-    muted: false,
-    volume: 0.8,
-    liveFormat: "m3u8",
-    vodFormat: "mp4"
-  }
-};
+let appSettings = { playback: { autoplay: true, muted: false, volume: 0.8, liveFormat: "m3u8", vodFormat: "mp4" } };
+let livePreferences = { hiddenChannelIds: [], folders: [] };
+let catalogCache = { live: null, vod: null, series: null };
+let liveManageMode = false;
 
 const sectionMeta = {
-  home: {
-    title: "In evidenza",
-    description: "Homepage pronta per suggeriti, continue watching e trend."
-  },
-  live: {
-    title: "Canali Live",
-    description: "Click su un canale per avviare il player integrato."
-  },
-  vod: {
-    title: "Film",
-    description: "Seleziona un film per riprodurlo nel player."
-  },
-  series: {
-    title: "Serie TV",
-    description: "Le card aprono il primo episodio disponibile."
-  },
-  settings: {
-    title: "Impostazioni",
-    description: "Modifica credenziali Xtream e parametri base di riproduzione."
+  home: { title: "In evidenza", description: "Naviga librerie live, film e serie in stile streaming." },
+  live: { title: "Canali Live", description: "Gestisci visibilità canali, cartelle e riproduzione con EPG." },
+  vod: { title: "Film", description: "Catalogo film con card orizzontali stile Netflix." },
+  series: { title: "Serie TV", description: "Serie TV organizzate in scaffali per categoria." },
+  settings: { title: "Impostazioni", description: "Credenziali Xtream e parametri di riproduzione semplici." }
+};
+
+const endpointBySection = { live: "api/live", vod: "api/vod", series: "api/series" };
+
+function escapeHtml(text) {
+  return String(text ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+}
+
+async function apiFetch(url, options = {}) {
+  const response = await fetch(new URL(url, window.location.href), options);
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`HTTP ${response.status} - ${body.slice(0, 180)}`);
   }
-};
-
-const endpointBySection = {
-  live: "api/live",
-  vod: "api/vod",
-  series: "api/series"
-};
-
-function createSkeletonCards() {
-  const cards = Array.from({ length: 12 }).map((_, idx) => {
-    const glow = idx % 3 === 0 ? "bg-premium-accent/20" : "bg-white/5";
-    return `
-      <article class="group overflow-hidden rounded-2xl border border-white/10 bg-premium-800/70 transition-all duration-300">
-        <div class="aspect-[2/3] ${glow} relative">
-          <div class="absolute inset-0 bg-gradient-to-t from-black/45 to-transparent"></div>
-          <div class="absolute bottom-3 left-3 right-3 h-2 rounded-full bg-white/20"></div>
-        </div>
-        <div class="space-y-2 p-3">
-          <div class="h-3 w-4/5 rounded-full bg-white/20"></div>
-          <div class="h-2 w-2/5 rounded-full bg-white/10"></div>
-        </div>
-      </article>
-    `;
-  });
-  posterGrid.innerHTML = cards.join("");
+  return response.json();
 }
 
 function setActiveSection(section) {
@@ -81,47 +51,36 @@ function setActiveSection(section) {
     btn.classList.toggle("border-premium-accent/40", active);
     btn.classList.toggle("shadow-glass", active);
     btn.classList.toggle("text-slate-300", !active);
-    btn.classList.toggle("hover:bg-white/5", !active);
   });
 }
 
-function escapeHtml(text) {
-  return String(text ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-function resolvePlaybackTarget(section, item) {
-  if (section === "series") {
-    const firstEpisode = item.seasons?.[0]?.episodes?.[0];
-    return {
-      url: firstEpisode?.streamUrl || null,
-      subtitle: firstEpisode ? `S${item.seasons?.[0]?.seasonNumber || 1}E${firstEpisode.episodeNumber || 1}` : item._categoryName
-    };
-  }
-  return { url: item.streamUrl || null, subtitle: item._categoryName };
+function setLoading(message = "Caricamento contenuti...") {
+  posterGrid.className = "space-y-6";
+  posterGrid.innerHTML = `<div class="glass rounded-2xl p-6 text-slate-300">${escapeHtml(message)}</div>`;
 }
 
 function normalizeCategories(section, payload) {
   const categories = payload?.categories || [];
-  return categories
-    .map((category) => ({
-      id: category.id,
-      name: category.name || "Uncategorized",
-      items: (category.items || []).map((item) => {
-        const playback = resolvePlaybackTarget(section, item);
-        return {
-          ...item,
-          _categoryName: category.name || "Uncategorized",
-          _playbackUrl: playback.url,
-          _playbackSubtitle: playback.subtitle || category.name || "Catalogo"
-        };
-      })
-    }))
-    .filter((category) => category.items.length > 0);
+  return categories.map((category) => ({
+    id: category.id,
+    name: category.name || "Uncategorized",
+    items: (category.items || []).map((item) => {
+      let playbackUrl = item.streamUrl || null;
+      let subtitle = category.name || "Catalogo";
+      if (section === "series") {
+        const firstEpisode = item.seasons?.[0]?.episodes?.[0];
+        playbackUrl = firstEpisode?.streamUrl || null;
+        subtitle = firstEpisode ? `S${item.seasons?.[0]?.seasonNumber || 1}E${firstEpisode.episodeNumber || 1}` : subtitle;
+      }
+      return {
+        ...item,
+        _section: section,
+        _categoryName: category.name || "Uncategorized",
+        _playbackUrl: playbackUrl,
+        _playbackSubtitle: subtitle
+      };
+    })
+  }));
 }
 
 function cleanupPlayer() {
@@ -134,44 +93,6 @@ function cleanupPlayer() {
   videoPlayer.load();
 }
 
-function renderEpgListings(listings) {
-  if (!listings?.length) {
-    epgList.innerHTML = `<p class="text-slate-400">Nessun dato EPG disponibile.</p>`;
-    return;
-  }
-  epgList.innerHTML = listings
-    .map((item) => {
-      const start = item.start ? new Date(item.start.replace(" ", "T")) : null;
-      const end = item.end ? new Date(item.end.replace(" ", "T")) : null;
-      const range = start && end ? `${start.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} - ${end.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Orario N/D";
-      return `
-        <div class="rounded-lg border border-white/10 bg-black/30 px-3 py-2">
-          <p class="text-[11px] uppercase tracking-[0.14em] text-slate-400">${escapeHtml(range)}</p>
-          <p class="font-medium text-slate-100">${escapeHtml(item.title)}</p>
-          ${item.description ? `<p class="mt-1 text-xs text-slate-300">${escapeHtml(item.description)}</p>` : ""}
-        </div>
-      `;
-    })
-    .join("");
-}
-
-async function loadEpgForLive(streamId) {
-  epgPanel.classList.remove("hidden");
-  epgList.innerHTML = `<p class="text-slate-400">Caricamento EPG...</p>`;
-  try {
-    const response = await fetch(new URL(`api/live/epg/${streamId}?limit=10`, window.location.href), {
-      headers: { Accept: "application/json" }
-    });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    const payload = await response.json();
-    renderEpgListings(payload.listings || []);
-  } catch (error) {
-    epgList.innerHTML = `<p class="text-rose-300">Errore EPG: ${escapeHtml(error.message)}</p>`;
-  }
-}
-
 function closePlayer() {
   playerModal.classList.add("hidden");
   playerModal.classList.remove("flex");
@@ -179,9 +100,32 @@ function closePlayer() {
   cleanupPlayer();
 }
 
+function renderEpgListings(listings) {
+  if (!listings?.length) {
+    epgList.innerHTML = `<p class="text-slate-400">Nessun dato EPG disponibile.</p>`;
+    return;
+  }
+  epgList.innerHTML = listings.map((item) => {
+    const start = item.start ? new Date(item.start.replace(" ", "T")) : null;
+    const end = item.end ? new Date(item.end.replace(" ", "T")) : null;
+    const range = start && end ? `${start.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} - ${end.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Orario N/D";
+    return `<div class="rounded-lg border border-white/10 bg-black/30 px-3 py-2"><p class="text-[11px] uppercase tracking-[0.14em] text-slate-400">${escapeHtml(range)}</p><p class="font-medium text-slate-100">${escapeHtml(item.title)}</p>${item.description ? `<p class="mt-1 text-xs text-slate-300">${escapeHtml(item.description)}</p>` : ""}</div>`;
+  }).join("");
+}
+
+async function loadEpgForLive(streamId) {
+  epgPanel.classList.remove("hidden");
+  epgList.innerHTML = `<p class="text-slate-400">Caricamento EPG...</p>`;
+  try {
+    const payload = await apiFetch(`api/live/epg/${streamId}?limit=10`);
+    renderEpgListings(payload.listings || []);
+  } catch (error) {
+    epgList.innerHTML = `<p class="text-rose-300">Errore EPG: ${escapeHtml(error.message)}</p>`;
+  }
+}
+
 function openPlayer(item) {
-  const streamUrl = item._playbackUrl;
-  if (!streamUrl) {
+  if (!item._playbackUrl) {
     alert("Nessun flusso disponibile per questo contenuto.");
     return;
   }
@@ -191,24 +135,16 @@ function openPlayer(item) {
   playerModal.classList.remove("hidden");
   playerModal.classList.add("flex");
 
-  const absoluteUrl = new URL(streamUrl, window.location.href).toString();
+  const absoluteUrl = new URL(item._playbackUrl, window.location.href).toString();
   const isHls = absoluteUrl.includes(".m3u8") || absoluteUrl.includes("ext=m3u8");
   videoPlayer.autoplay = Boolean(appSettings.playback?.autoplay);
   videoPlayer.muted = Boolean(appSettings.playback?.muted);
   videoPlayer.volume = Number(appSettings.playback?.volume ?? 0.8);
 
   if (isHls && window.Hls?.isSupported()) {
-    currentHls = new window.Hls({
-      enableWorker: true,
-      lowLatencyMode: true
-    });
+    currentHls = new window.Hls({ enableWorker: true, lowLatencyMode: true });
     currentHls.loadSource(absoluteUrl);
     currentHls.attachMedia(videoPlayer);
-    currentHls.on(window.Hls.Events.ERROR, (_event, data) => {
-      if (data?.fatal) {
-        console.error("HLS fatal error:", data);
-      }
-    });
   } else {
     videoPlayer.src = absoluteUrl;
   }
@@ -224,111 +160,196 @@ function openPlayer(item) {
   }
 }
 
-function renderMediaCards(section, payload) {
-  const categories = normalizeCategories(section, payload);
-  if (!categories.length) {
-    posterGrid.innerHTML = `
-      <div class="col-span-full glass rounded-2xl p-6 text-center text-slate-300">
-        Nessun contenuto disponibile per questa sezione.
-      </div>
-    `;
-    return;
+async function loadLivePreferences() {
+  try {
+    livePreferences = await apiFetch("api/live/preferences");
+  } catch {
+    livePreferences = { hiddenChannelIds: [], folders: [] };
   }
+}
+
+async function saveLivePreferences() {
+  const payload = {
+    hiddenChannelIds: livePreferences.hiddenChannelIds || [],
+    folders: livePreferences.folders || []
+  };
+  const saved = await apiFetch("api/live/preferences", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(payload)
+  });
+  livePreferences = saved.livePreferences || payload;
+}
+
+function isChannelHidden(channelId) {
+  return (livePreferences.hiddenChannelIds || []).includes(String(channelId));
+}
+
+function channelCard(item, idx, folderId = "") {
+  const title = item.title || item.name || `Canale ${item.id}`;
+  const icon = item.icon || null;
+  const hidden = isChannelHidden(item.id);
+  const showTools = liveManageMode ? `<div class="mt-2 flex gap-2"><button data-action="toggle-visibility" data-id="${item.id}" class="rounded-md border border-white/20 px-2 py-1 text-[10px]">${hidden ? "Mostra" : "Nascondi"}</button><button data-action="assign-folder" data-id="${item.id}" data-folder="${folderId}" class="rounded-md border border-white/20 px-2 py-1 text-[10px]">Sposta</button></div>` : "";
+  return `<button data-item-index="${idx}" data-channel-id="${escapeHtml(item.id)}" class="media-card group relative w-44 shrink-0 overflow-hidden rounded-2xl border ${hidden ? "border-rose-500/50 opacity-60" : "border-white/10"} bg-premium-800/70 text-left transition-all duration-300 hover:-translate-y-1 hover:border-premium-accent/50 hover:shadow-glass"><div class="relative aspect-[2/3]">${icon ? `<img src="api/image?url=${encodeURIComponent(icon)}" alt="${escapeHtml(title)}" class="h-full w-full object-cover" loading="lazy" />` : `<div class="flex h-full w-full items-center justify-center bg-gradient-to-br from-premium-700 to-premium-600 text-xs tracking-[0.22em] text-slate-300">LIVE</div>`}<div class="absolute right-2 top-2 rounded-md bg-rose-600/90 px-2 py-0.5 text-[10px] font-semibold tracking-[0.12em] text-white">LIVE</div></div><div class="p-3"><h4 class="line-clamp-2 text-sm font-semibold text-slate-100">${escapeHtml(title)}</h4>${showTools}</div></button>`;
+}
+
+function renderLiveWithFolders(payload) {
+  const categories = normalizeCategories("live", payload);
+  const allChannels = categories.flatMap((cat) => cat.items);
+  const byId = new Map(allChannels.map((item) => [String(item.id), item]));
+  const hiddenIds = new Set((livePreferences.hiddenChannelIds || []).map(String));
+
+  const folders = livePreferences.folders || [];
+  const folderSections = folders.map((folder) => {
+    const items = (folder.channelIds || [])
+      .map((id) => byId.get(String(id)))
+      .filter(Boolean)
+      .filter((ch) => !hiddenIds.has(String(ch.id)));
+    return { id: folder.id, name: folder.name, items };
+  }).filter((f) => f.items.length > 0);
+
+  const assigned = new Set(folderSections.flatMap((f) => f.items.map((c) => String(c.id))));
+  const unassigned = allChannels.filter((item) => !assigned.has(String(item.id)) && !hiddenIds.has(String(item.id)));
+
+  const toolbar = `<div class="glass rounded-2xl p-4"><div class="flex flex-wrap items-center gap-2"><button id="toggleManageMode" class="rounded-xl border border-white/20 px-3 py-2 text-xs">${liveManageMode ? "Disattiva gestione" : "Gestisci canali"}</button><button id="createFolderBtn" class="rounded-xl border border-white/20 px-3 py-2 text-xs">Nuova cartella</button><span class="text-xs text-slate-400">Canali totali: ${allChannels.length} · nascosti: ${hiddenIds.size}</span></div></div>`;
+
+  const sectionHtml = [];
+  for (const folder of folderSections) {
+    sectionHtml.push(`<section class="space-y-2"><h4 class="px-1 text-sm font-semibold uppercase tracking-[0.14em] text-slate-300">${escapeHtml(folder.name)}</h4><div class="flex gap-3 overflow-x-auto pb-2 pr-2">${folder.items.map((item, idx) => channelCard(item, idx, folder.id)).join("")}</div></section>`);
+  }
+  sectionHtml.push(`<section class="space-y-2"><h4 class="px-1 text-sm font-semibold uppercase tracking-[0.14em] text-slate-300">Canali non assegnati</h4><div class="flex gap-3 overflow-x-auto pb-2 pr-2">${unassigned.map((item, idx) => channelCard(item, idx, "")).join("")}</div></section>`);
 
   posterGrid.className = "space-y-6";
-  posterGrid.innerHTML = categories
-    .map((category, catIndex) => {
-      const cards = category.items
-        .map((rawItem, itemIndex) => {
-          const item = { ...rawItem, _section: section };
-          const title = item.title || item.name || `Item ${item.id || ""}`;
-          const subtitle = item._playbackSubtitle || item._categoryName || "Catalogo";
-          const poster = item.poster || item.icon || null;
-          const fallbackTag = section === "live" ? "LIVE" : section === "vod" ? "FILM" : "SERIE";
-          const isLive = section === "live";
-          return `
-            <button data-cat-index="${catIndex}" data-item-index="${itemIndex}" class="media-card group relative w-44 shrink-0 overflow-hidden rounded-2xl border border-white/10 bg-premium-800/70 text-left transition-all duration-300 hover:-translate-y-1 hover:border-premium-accent/50 hover:shadow-glass">
-              <div class="relative aspect-[2/3]">
-                ${
-                  poster
-                    ? `<img src="api/image?url=${encodeURIComponent(poster)}" alt="${escapeHtml(title)}" class="h-full w-full object-cover" loading="lazy" />`
-                    : `<div class="flex h-full w-full items-center justify-center bg-gradient-to-br from-premium-700 to-premium-600 text-xs tracking-[0.22em] text-slate-300">${fallbackTag}</div>`
-                }
-                <div class="absolute inset-0 bg-gradient-to-t from-black/75 via-black/15 to-transparent opacity-90"></div>
-                <div class="absolute bottom-2 left-2 rounded-md border border-white/15 bg-black/45 px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-200">
-                  ${escapeHtml(subtitle)}
-                </div>
-                ${isLive ? `<div class="absolute right-2 top-2 rounded-md bg-rose-600/90 px-2 py-0.5 text-[10px] font-semibold tracking-[0.12em] text-white">LIVE</div>` : ""}
-              </div>
-              <div class="space-y-1 p-3">
-                <h4 class="line-clamp-2 text-sm font-semibold text-slate-100">${escapeHtml(title)}</h4>
-                <p class="text-xs text-slate-400">${escapeHtml(item.year || item.releaseDate || "")}</p>
-              </div>
-            </button>
-          `;
-        })
-        .join("");
-      return `
-        <section class="space-y-2">
-          <h4 class="px-1 text-sm font-semibold uppercase tracking-[0.14em] text-slate-300">${escapeHtml(category.name)}</h4>
-          <div class="flex gap-3 overflow-x-auto pb-2 pr-2">${cards}</div>
-        </section>
-      `;
-    })
-    .join("");
+  posterGrid.innerHTML = `${toolbar}${sectionHtml.join("")}`;
 
-  const clickItems = Array.from(document.querySelectorAll(".media-card"));
-  clickItems.forEach((card) => {
+  Array.from(document.querySelectorAll(".media-card")).forEach((card) => {
+    card.addEventListener("click", (event) => {
+      const actionBtn = event.target.closest("button[data-action]");
+      if (actionBtn) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      const itemId = String(card.dataset.channelId || "");
+      const item = allChannels.find((ch) => String(ch.id) === itemId);
+      if (item) {
+        openPlayer(item);
+      }
+    });
+  });
+
+  const manageBtn = document.getElementById("toggleManageMode");
+  const createFolderBtn = document.getElementById("createFolderBtn");
+  if (manageBtn) {
+    manageBtn.addEventListener("click", () => {
+      liveManageMode = !liveManageMode;
+      renderLiveWithFolders(payload);
+    });
+  }
+  if (createFolderBtn) {
+    createFolderBtn.addEventListener("click", async () => {
+      const name = prompt("Nome cartella canali:");
+      if (!name) return;
+      livePreferences.folders = [...(livePreferences.folders || []), { id: `folder_${Date.now()}`, name: name.trim(), channelIds: [] }];
+      await saveLivePreferences();
+      renderLiveWithFolders(payload);
+    });
+  }
+
+  Array.from(document.querySelectorAll("button[data-action='toggle-visibility']")).forEach((btn) => {
+    btn.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const id = String(btn.dataset.id);
+      const set = new Set((livePreferences.hiddenChannelIds || []).map(String));
+      if (set.has(id)) set.delete(id); else set.add(id);
+      livePreferences.hiddenChannelIds = Array.from(set);
+      await saveLivePreferences();
+      renderLiveWithFolders(payload);
+    });
+  });
+
+  Array.from(document.querySelectorAll("button[data-action='assign-folder']")).forEach((btn) => {
+    btn.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const channelId = String(btn.dataset.id);
+      const name = prompt("Nome cartella destinazione (esistente o nuova):");
+      if (!name) return;
+      let folder = (livePreferences.folders || []).find((f) => f.name.toLowerCase() === name.trim().toLowerCase());
+      if (!folder) {
+        folder = { id: `folder_${Date.now()}`, name: name.trim(), channelIds: [] };
+        livePreferences.folders.push(folder);
+      }
+      for (const f of livePreferences.folders) {
+        f.channelIds = (f.channelIds || []).filter((id) => String(id) !== channelId);
+      }
+      folder.channelIds = [...new Set([...(folder.channelIds || []), channelId])];
+      await saveLivePreferences();
+      renderLiveWithFolders(payload);
+    });
+  });
+}
+
+function renderShelfCards(section, payload) {
+  const categories = normalizeCategories(section, payload).filter((c) => c.items.length > 0);
+  if (!categories.length) {
+    posterGrid.className = "space-y-6";
+    posterGrid.innerHTML = `<div class="glass rounded-2xl p-6 text-slate-300">Nessun contenuto disponibile.</div>`;
+    return;
+  }
+  posterGrid.className = "space-y-6";
+  posterGrid.innerHTML = categories.map((category, catIdx) => {
+    const cards = category.items.map((item, idx) => {
+      const title = item.title || item.name || `Item ${item.id || ""}`;
+      const poster = item.poster || item.icon || null;
+      const tag = section === "vod" ? "FILM" : "SERIE";
+      return `<button data-cat="${catIdx}" data-idx="${idx}" class="shelf-card w-44 shrink-0 overflow-hidden rounded-2xl border border-white/10 bg-premium-800/70 text-left transition-all duration-300 hover:-translate-y-1 hover:border-premium-accent/50 hover:shadow-glass"><div class="relative aspect-[2/3]">${poster ? `<img src="api/image?url=${encodeURIComponent(poster)}" alt="${escapeHtml(title)}" class="h-full w-full object-cover" loading="lazy" />` : `<div class="flex h-full w-full items-center justify-center bg-gradient-to-br from-premium-700 to-premium-600 text-xs tracking-[0.22em] text-slate-300">${tag}</div>`}<div class="absolute inset-0 bg-gradient-to-t from-black/75 via-black/15 to-transparent"></div></div><div class="p-3"><h4 class="line-clamp-2 text-sm font-semibold text-slate-100">${escapeHtml(title)}</h4></div></button>`;
+    }).join("");
+    return `<section class="space-y-2"><h4 class="px-1 text-sm font-semibold uppercase tracking-[0.14em] text-slate-300">${escapeHtml(category.name)}</h4><div class="flex gap-3 overflow-x-auto pb-2 pr-2">${cards}</div></section>`;
+  }).join("");
+
+  Array.from(document.querySelectorAll(".shelf-card")).forEach((card) => {
     card.addEventListener("click", () => {
-      const catIdx = Number(card.dataset.catIndex);
-      const itemIdx = Number(card.dataset.itemIndex);
-      const item = { ...categories[catIdx].items[itemIdx], _section: section };
+      const cat = Number(card.dataset.cat);
+      const idx = Number(card.dataset.idx);
+      const item = categories[cat].items[idx];
       openPlayer(item);
     });
   });
 }
 
 async function fetchSectionData(section) {
-  const endpoint = endpointBySection[section];
-  if (!endpoint) {
+  if (!endpointBySection[section]) {
     apiStatus.textContent = "UI ready";
     apiStatus.className = "mt-1 text-base font-medium text-emerald-300";
-    posterGrid.className = "grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6";
-    posterGrid.innerHTML = `
-      <div class="col-span-full glass rounded-2xl p-6 text-center text-slate-300">
-        Seleziona una libreria per vedere i contenuti e iniziare la riproduzione.
-      </div>
-    `;
+    posterGrid.className = "space-y-6";
+    posterGrid.innerHTML = `<div class="glass rounded-2xl p-6 text-slate-300">Seleziona una libreria per vedere i contenuti.</div>`;
     return;
   }
 
   apiStatus.textContent = "Caricamento...";
   apiStatus.className = "mt-1 text-base font-medium text-amber-300";
+  setLoading();
 
   try {
-    const response = await fetch(new URL(endpoint, window.location.href), {
-      headers: { Accept: "application/json" }
-    });
-    if (!response.ok) {
-      const bodyText = await response.text();
-      throw new Error(`HTTP ${response.status} - ${bodyText.slice(0, 180)}`);
+    if (section === "live") {
+      await loadLivePreferences();
     }
-
-    const data = await response.json();
-    console.log(`[${section.toUpperCase()}] payload:`, data);
-    renderMediaCards(section, data);
-
+    const payload = await apiFetch(endpointBySection[section], { headers: { Accept: "application/json" } });
+    catalogCache[section] = payload;
+    if (section === "live") {
+      renderLiveWithFolders(payload);
+    } else {
+      renderShelfCards(section, payload);
+    }
     apiStatus.textContent = "Online";
     apiStatus.className = "mt-1 text-base font-medium text-emerald-300";
   } catch (error) {
-    console.error(`[${section.toUpperCase()}] fetch error:`, error);
     apiStatus.textContent = "Errore API";
     apiStatus.className = "mt-1 text-base font-medium text-rose-300";
-    posterGrid.innerHTML = `
-      <div class="col-span-full glass rounded-2xl p-6 text-center text-rose-300">
-        Errore caricamento API: ${escapeHtml(error.message)}
-      </div>
-    `;
+    posterGrid.className = "space-y-6";
+    posterGrid.innerHTML = `<div class="glass rounded-2xl p-6 text-rose-300">Errore caricamento API: ${escapeHtml(error.message)}</div>`;
   }
 }
 
@@ -346,13 +367,7 @@ function fillSettingsForm(settings) {
 async function loadSettings() {
   settingsStatus.textContent = "Caricamento...";
   try {
-    const response = await fetch(new URL("api/settings", window.location.href), {
-      headers: { Accept: "application/json" }
-    });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    const settings = await response.json();
+    const settings = await apiFetch("api/settings", { headers: { Accept: "application/json" } });
     appSettings = settings;
     fillSettingsForm(settings);
     settingsStatus.textContent = "Impostazioni pronte";
@@ -376,22 +391,15 @@ async function saveSettings(event) {
       muted: document.getElementById("playbackMuted").checked
     }
   };
-
   try {
-    const response = await fetch(new URL("api/settings", window.location.href), {
+    const body = await apiFetch("api/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify(payload)
     });
-    const body = await response.json();
-    if (!response.ok) {
-      throw new Error(body.error || `HTTP ${response.status}`);
-    }
     appSettings = body.settings;
     fillSettingsForm(body.settings);
     settingsStatus.textContent = "Salvato con successo";
-    apiStatus.textContent = "Online";
-    apiStatus.className = "mt-1 text-base font-medium text-emerald-300";
   } catch (error) {
     settingsStatus.textContent = `Errore salvataggio: ${error.message}`;
   }
@@ -405,26 +413,19 @@ function handleSection(section) {
   settingsPanel.classList.toggle("hidden", section !== "settings");
 
   if (section === "settings") {
-    posterGrid.className = "grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6";
+    posterGrid.className = "space-y-6";
     posterGrid.innerHTML = "";
     loadSettings();
     return;
   }
-
-  posterGrid.className = "grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6";
-  createSkeletonCards();
   fetchSectionData(section);
 }
 
-navItems.forEach((btn) => {
-  btn.addEventListener("click", () => handleSection(btn.dataset.section));
-});
+navItems.forEach((btn) => btn.addEventListener("click", () => handleSection(btn.dataset.section)));
 settingsForm.addEventListener("submit", saveSettings);
 closePlayerBtn.addEventListener("click", closePlayer);
 playerModal.addEventListener("click", (event) => {
-  if (event.target === playerModal) {
-    closePlayer();
-  }
+  if (event.target === playerModal) closePlayer();
 });
 
 handleSection("home");

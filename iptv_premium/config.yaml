@@ -2,7 +2,7 @@ name: "IPTV Premium"
 version: "0.1.0"
 slug: "iptv_premium"
 description: "Advanced IPTV add-on with Xtream backend and premium UI"
-url: "https://example.com/iptv_premium"
+url: "https://github.com/ilbruzzz/iptv"
 arch:
   - amd64
   - aarch64
@@ -17,7 +17,7 @@ panel_title: IPTV Premium
 map:
   - addon_config:rw
 ports:
-  8099/tcp: null
+  8099/tcp: 8099
 ports_description:
   8099/tcp: "IPTV Premium web interface and API"
 options:
@@ -25,8 +25,18 @@ options:
   xtream_username: ""
   xtream_password: ""
   stream_format: "m3u8"
+  playback_autoplay: true
+  playback_muted: false
+  playback_volume: 0.8
+  playback_live_format: "m3u8"
+  playback_vod_format: "mp4"
 schema:
   xtream_url: str
   xtream_username: str
   xtream_password: password
   stream_format: list(m3u8|ts)
+  playback_autoplay: bool
+  playback_muted: bool
+  playback_volume: float(0,1)
+  playback_live_format: list(m3u8|ts)
+  playback_vod_format: list(mp4|mkv|m3u8)

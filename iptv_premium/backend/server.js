@@ -17,6 +17,10 @@ const DEFAULT_PLAYBACK_SETTINGS = {
   liveFormat: "m3u8",
   vodFormat: "mp4"
 };
+const DEFAULT_LIVE_PREFERENCES = {
+  hiddenChannelIds: [],
+  folders: []
+};
 
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
@@ -54,7 +58,12 @@ function loadOptions() {
     xtream_url: process.env.XTREAM_URL || "",
     xtream_username: process.env.XTREAM_USERNAME || "",
     xtream_password: process.env.XTREAM_PASSWORD || "",
-    stream_format: process.env.STREAM_FORMAT || "m3u8"
+    stream_format: process.env.STREAM_FORMAT || "m3u8",
+    playback_autoplay: process.env.PLAYBACK_AUTOPLAY === "true",
+    playback_muted: process.env.PLAYBACK_MUTED === "true",
+    playback_volume: Number(process.env.PLAYBACK_VOLUME || 0.8),
+    playback_live_format: process.env.PLAYBACK_LIVE_FORMAT || "m3u8",
+    playback_vod_format: process.env.PLAYBACK_VOD_FORMAT || "mp4"
   };
 
   try {
@@ -62,7 +71,14 @@ function loadOptions() {
       return {
         ...envOptions,
         xtream_url: parseBaseUrl(envOptions.xtream_url),
-        stream_format: envOptions.stream_format || "m3u8"
+        stream_format: envOptions.stream_format || "m3u8",
+        playback: {
+          autoplay: envOptions.playback_autoplay,
+          muted: envOptions.playback_muted,
+          volume: envOptions.playback_volume,
+          liveFormat: envOptions.playback_live_format,
+          vodFormat: envOptions.playback_vod_format
+        }
       };
     }
 
@@ -72,13 +88,27 @@ function loadOptions() {
       xtream_url: parseBaseUrl(parsed.xtream_url || envOptions.xtream_url),
       xtream_username: parsed.xtream_username || envOptions.xtream_username,
       xtream_password: parsed.xtream_password || envOptions.xtream_password,
-      stream_format: parsed.stream_format || envOptions.stream_format || "m3u8"
+      stream_format: parsed.stream_format || envOptions.stream_format || "m3u8",
+      playback: {
+        autoplay: parsed.playback_autoplay ?? envOptions.playback_autoplay,
+        muted: parsed.playback_muted ?? envOptions.playback_muted,
+        volume: parsed.playback_volume ?? envOptions.playback_volume,
+        liveFormat: parsed.playback_live_format || envOptions.playback_live_format,
+        vodFormat: parsed.playback_vod_format || envOptions.playback_vod_format
+      }
     };
   } catch (_err) {
     return {
       ...envOptions,
       xtream_url: parseBaseUrl(envOptions.xtream_url),
-      stream_format: envOptions.stream_format || "m3u8"
+      stream_format: envOptions.stream_format || "m3u8",
+      playback: {
+        autoplay: envOptions.playback_autoplay,
+        muted: envOptions.playback_muted,
+        volume: envOptions.playback_volume,
+        liveFormat: envOptions.playback_live_format,
+        vodFormat: envOptions.playback_vod_format
+      }
     };
   }
 }
@@ -96,12 +126,36 @@ function loadRuntimeSettings() {
 }
 
 function normalizePlaybackSettings(input = {}) {
+  const liveFormat = ["m3u8", "ts"].includes(String(input.liveFormat)) ? String(input.liveFormat) : DEFAULT_PLAYBACK_SETTINGS.liveFormat;
+  const vodFormat = ["mp4", "mkv", "m3u8"].includes(String(input.vodFormat)) ? String(input.vodFormat) : DEFAULT_PLAYBACK_SETTINGS.vodFormat;
   return {
     autoplay: Boolean(input.autoplay ?? DEFAULT_PLAYBACK_SETTINGS.autoplay),
     muted: Boolean(input.muted ?? DEFAULT_PLAYBACK_SETTINGS.muted),
     volume: Math.max(0, Math.min(1, Number(input.volume ?? DEFAULT_PLAYBACK_SETTINGS.volume))),
-    liveFormat: String(input.liveFormat || DEFAULT_PLAYBACK_SETTINGS.liveFormat),
-    vodFormat: String(input.vodFormat || DEFAULT_PLAYBACK_SETTINGS.vodFormat)
+    liveFormat,
+    vodFormat
+  };
+}
+
+function normalizeLivePreferences(input = {}) {
+  const hiddenChannelIds = Array.isArray(input.hiddenChannelIds)
+    ? [...new Set(input.hiddenChannelIds.map((id) => String(id)))]
+    : [];
+  const folders = Array.isArray(input.folders)
+    ? input
+        .map((folder) => ({
+          id: String(folder.id || `folder_${Date.now()}`),
+          name: String(folder.name || "Cartella"),
+          channelIds: Array.isArray(folder.channelIds)
+            ? [...new Set(folder.channelIds.map((id) => String(id)))]
+            : []
+        }))
+        .filter((folder) => folder.name.trim().length > 0)
+    : [];
+
+  return {
+    hiddenChannelIds,
+    folders
   };
 }
 
@@ -113,7 +167,8 @@ function getEffectiveConfig() {
     xtream_username: runtime.xtream_username || cfg.xtream_username,
     xtream_password: runtime.xtream_password || cfg.xtream_password,
     stream_format: runtime.stream_format || cfg.stream_format || "m3u8",
-    playback: normalizePlaybackSettings(runtime.playback || {})
+    playback: normalizePlaybackSettings(runtime.playback || cfg.playback || {}),
+    livePreferences: normalizeLivePreferences(runtime.livePreferences || DEFAULT_LIVE_PREFERENCES)
   };
 }
 
@@ -123,7 +178,8 @@ function saveRuntimeSettings(nextSettings) {
     xtream_username: nextSettings.xtream_username || "",
     xtream_password: nextSettings.xtream_password || "",
     stream_format: nextSettings.stream_format || "m3u8",
-    playback: normalizePlaybackSettings(nextSettings.playback || {})
+    playback: normalizePlaybackSettings(nextSettings.playback || {}),
+    livePreferences: normalizeLivePreferences(nextSettings.livePreferences || DEFAULT_LIVE_PREFERENCES)
   };
   fs.writeFileSync(RUNTIME_SETTINGS_PATH, JSON.stringify(payload, null, 2), "utf-8");
 }
@@ -155,7 +211,8 @@ function publicSettingsFromConfig(cfg) {
     xtream_username: cfg.xtream_username,
     xtream_password: cfg.xtream_password ? "********" : "",
     stream_format: cfg.stream_format,
-    playback: cfg.playback
+    playback: cfg.playback,
+    livePreferences: cfg.livePreferences
   };
 }
 
@@ -353,6 +410,25 @@ app.get("/api/live", async (_req, res, next) => {
       categories,
       totalChannels: channels.length
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/live/preferences", (_req, res) => {
+  const cfg = getEffectiveConfig();
+  res.json(cfg.livePreferences || DEFAULT_LIVE_PREFERENCES);
+});
+
+app.put("/api/live/preferences", (req, res, next) => {
+  try {
+    const cfg = getEffectiveConfig();
+    const incoming = normalizeLivePreferences(req.body || {});
+    saveRuntimeSettings({
+      ...cfg,
+      livePreferences: incoming
+    });
+    res.json({ ok: true, livePreferences: incoming });
   } catch (error) {
     next(error);
   }
