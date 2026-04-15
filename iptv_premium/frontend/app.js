@@ -14,17 +14,21 @@ const epgPanel = document.getElementById("epgPanel");
 const epgList = document.getElementById("epgList");
 
 let currentHls = null;
-let appSettings = { playback: { autoplay: true, muted: false, volume: 0.8, liveFormat: "m3u8", vodFormat: "mp4" } };
-let livePreferences = { hiddenChannelIds: [], folders: [] };
-let catalogCache = { live: null, vod: null, series: null };
+let fallbackTried = false;
+let selectedLiveFolder = "all";
 let liveManageMode = false;
+let currentSection = "home";
+let appSettings = { playback: { autoplay: true, muted: false, volume: 0.8, liveFormat: "m3u8", vodFormat: "mp4" } };
+let livePreferences = { hiddenChannelIds: [], folders: [], favoriteChannelIds: [] };
+let catalogCache = { live: null, vod: null, series: null };
+const renderedItems = new Map();
 
 const sectionMeta = {
-  home: { title: "In evidenza", description: "Naviga librerie live, film e serie in stile streaming." },
-  live: { title: "Canali Live", description: "Gestisci visibilità canali, cartelle e riproduzione con EPG." },
-  vod: { title: "Film", description: "Catalogo film con card orizzontali stile Netflix." },
-  series: { title: "Serie TV", description: "Serie TV organizzate in scaffali per categoria." },
-  settings: { title: "Impostazioni", description: "Credenziali Xtream e parametri di riproduzione semplici." }
+  home: { title: "Home", description: "Preferiti e guida TV dedicata ai canali che segui." },
+  live: { title: "Canali Live", description: "Cartelle laterali e canali disposti in pagina." },
+  vod: { title: "Film", description: "Catalogo film in stile streaming." },
+  series: { title: "Serie TV", description: "Serie TV organizzate per categoria." },
+  settings: { title: "Impostazioni", description: "Configura credenziali e parametri di riproduzione." }
 };
 
 const endpointBySection = { live: "api/live", vod: "api/vod", series: "api/series" };
@@ -54,31 +58,24 @@ function setActiveSection(section) {
   });
 }
 
-function setLoading(message = "Caricamento contenuti...") {
+function setLoading(message = "Caricamento...") {
   posterGrid.className = "space-y-6";
   posterGrid.innerHTML = `<div class="glass rounded-2xl p-6 text-slate-300">${escapeHtml(message)}</div>`;
 }
 
 function normalizeCategories(section, payload) {
-  const categories = payload?.categories || [];
-  return categories.map((category) => ({
+  return (payload?.categories || []).map((category) => ({
     id: category.id,
     name: category.name || "Uncategorized",
     items: (category.items || []).map((item) => {
       let playbackUrl = item.streamUrl || null;
       let subtitle = category.name || "Catalogo";
       if (section === "series") {
-        const firstEpisode = item.seasons?.[0]?.episodes?.[0];
-        playbackUrl = firstEpisode?.streamUrl || null;
-        subtitle = firstEpisode ? `S${item.seasons?.[0]?.seasonNumber || 1}E${firstEpisode.episodeNumber || 1}` : subtitle;
+        const ep = item.seasons?.[0]?.episodes?.[0];
+        playbackUrl = ep?.streamUrl || null;
+        subtitle = ep ? `S${item.seasons?.[0]?.seasonNumber || 1}E${ep.episodeNumber || 1}` : subtitle;
       }
-      return {
-        ...item,
-        _section: section,
-        _categoryName: category.name || "Uncategorized",
-        _playbackUrl: playbackUrl,
-        _playbackSubtitle: subtitle
-      };
+      return { ...item, _section: section, _playbackUrl: playbackUrl, _subtitle: subtitle };
     })
   }));
 }
@@ -91,6 +88,7 @@ function cleanupPlayer() {
   videoPlayer.pause();
   videoPlayer.removeAttribute("src");
   videoPlayer.load();
+  fallbackTried = false;
 }
 
 function closePlayer() {
@@ -100,33 +98,27 @@ function closePlayer() {
   cleanupPlayer();
 }
 
-function renderEpgListings(listings) {
-  if (!listings?.length) {
-    epgList.innerHTML = `<p class="text-slate-400">Nessun dato EPG disponibile.</p>`;
-    return;
-  }
-  epgList.innerHTML = listings.map((item) => {
-    const start = item.start ? new Date(item.start.replace(" ", "T")) : null;
-    const end = item.end ? new Date(item.end.replace(" ", "T")) : null;
-    const range = start && end ? `${start.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} - ${end.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Orario N/D";
-    return `<div class="rounded-lg border border-white/10 bg-black/30 px-3 py-2"><p class="text-[11px] uppercase tracking-[0.14em] text-slate-400">${escapeHtml(range)}</p><p class="font-medium text-slate-100">${escapeHtml(item.title)}</p>${item.description ? `<p class="mt-1 text-xs text-slate-300">${escapeHtml(item.description)}</p>` : ""}</div>`;
-  }).join("");
+function isHlsUrl(url) {
+  return url.includes(".m3u8") || url.includes("ext=m3u8");
 }
 
-async function loadEpgForLive(streamId) {
-  epgPanel.classList.remove("hidden");
-  epgList.innerHTML = `<p class="text-slate-400">Caricamento EPG...</p>`;
-  try {
-    const payload = await apiFetch(`api/live/epg/${streamId}?limit=10`);
-    renderEpgListings(payload.listings || []);
-  } catch (error) {
-    epgList.innerHTML = `<p class="text-rose-300">Errore EPG: ${escapeHtml(error.message)}</p>`;
+function buildM3u8Fallback(url) {
+  if (!url.includes("ext=ts")) {
+    return null;
+  }
+  return url.replace("ext=ts", "ext=m3u8");
+}
+
+function attachNativePlayer(url) {
+  videoPlayer.src = url;
+  if (videoPlayer.autoplay) {
+    videoPlayer.play().catch(() => {});
   }
 }
 
 function openPlayer(item) {
-  if (!item._playbackUrl) {
-    alert("Nessun flusso disponibile per questo contenuto.");
+  if (!item?._playbackUrl) {
+    alert("Nessun flusso disponibile.");
     return;
   }
 
@@ -135,28 +127,64 @@ function openPlayer(item) {
   playerModal.classList.remove("hidden");
   playerModal.classList.add("flex");
 
-  const absoluteUrl = new URL(item._playbackUrl, window.location.href).toString();
-  const isHls = absoluteUrl.includes(".m3u8") || absoluteUrl.includes("ext=m3u8");
+  const source = new URL(item._playbackUrl, window.location.href).toString();
   videoPlayer.autoplay = Boolean(appSettings.playback?.autoplay);
   videoPlayer.muted = Boolean(appSettings.playback?.muted);
   videoPlayer.volume = Number(appSettings.playback?.volume ?? 0.8);
 
-  if (isHls && window.Hls?.isSupported()) {
+  if (isHlsUrl(source) && window.Hls?.isSupported()) {
     currentHls = new window.Hls({ enableWorker: true, lowLatencyMode: true });
-    currentHls.loadSource(absoluteUrl);
+    currentHls.loadSource(source);
     currentHls.attachMedia(videoPlayer);
+    currentHls.on(window.Hls.Events.MANIFEST_PARSED, () => {
+      if (videoPlayer.autoplay) {
+        videoPlayer.play().catch(() => {});
+      }
+    });
+    currentHls.on(window.Hls.Events.ERROR, (_event, data) => {
+      if (data?.fatal && !fallbackTried) {
+        const fallback = buildM3u8Fallback(source);
+        if (fallback) {
+          fallbackTried = true;
+          currentHls.destroy();
+          currentHls = new window.Hls({ enableWorker: true, lowLatencyMode: true });
+          currentHls.loadSource(fallback);
+          currentHls.attachMedia(videoPlayer);
+        }
+      }
+    });
   } else {
-    videoPlayer.src = absoluteUrl;
-  }
-
-  if (videoPlayer.autoplay) {
-    videoPlayer.play().catch(() => {});
+    attachNativePlayer(source);
   }
 
   if (item._section === "live" && item.id) {
-    loadEpgForLive(item.id);
+    loadLiveEpg(item.id);
   } else {
     epgPanel.classList.add("hidden");
+  }
+}
+
+function renderPlayerEpg(listings) {
+  if (!listings?.length) {
+    epgList.innerHTML = `<p class="text-slate-400">Nessun dato EPG disponibile.</p>`;
+    return;
+  }
+  epgList.innerHTML = listings.map((entry) => {
+    const start = entry.start ? new Date(entry.start.replace(" ", "T")) : null;
+    const end = entry.end ? new Date(entry.end.replace(" ", "T")) : null;
+    const range = start && end ? `${start.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} - ${end.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Orario N/D";
+    return `<div class="rounded-lg border border-white/10 bg-black/30 px-3 py-2"><p class="text-[11px] uppercase tracking-[0.14em] text-slate-400">${escapeHtml(range)}</p><p class="font-medium text-slate-100">${escapeHtml(entry.title)}</p></div>`;
+  }).join("");
+}
+
+async function loadLiveEpg(streamId) {
+  epgPanel.classList.remove("hidden");
+  epgList.innerHTML = `<p class="text-slate-400">Caricamento EPG...</p>`;
+  try {
+    const payload = await apiFetch(`api/live/epg/${streamId}?limit=8`);
+    renderPlayerEpg(payload.listings || []);
+  } catch (error) {
+    epgList.innerHTML = `<p class="text-rose-300">Errore EPG: ${escapeHtml(error.message)}</p>`;
   }
 }
 
@@ -164,134 +192,167 @@ async function loadLivePreferences() {
   try {
     livePreferences = await apiFetch("api/live/preferences");
   } catch {
-    livePreferences = { hiddenChannelIds: [], folders: [] };
+    livePreferences = { hiddenChannelIds: [], folders: [], favoriteChannelIds: [] };
   }
 }
 
 async function saveLivePreferences() {
   const payload = {
     hiddenChannelIds: livePreferences.hiddenChannelIds || [],
-    folders: livePreferences.folders || []
+    folders: livePreferences.folders || [],
+    favoriteChannelIds: livePreferences.favoriteChannelIds || []
   };
-  const saved = await apiFetch("api/live/preferences", {
+  const result = await apiFetch("api/live/preferences", {
     method: "PUT",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify(payload)
   });
-  livePreferences = saved.livePreferences || payload;
+  livePreferences = result.livePreferences || payload;
 }
 
-function isChannelHidden(channelId) {
+function isHidden(channelId) {
   return (livePreferences.hiddenChannelIds || []).includes(String(channelId));
 }
 
-function channelCard(item, idx, folderId = "") {
-  const title = item.title || item.name || `Canale ${item.id}`;
-  const icon = item.icon || null;
-  const hidden = isChannelHidden(item.id);
-  const showTools = liveManageMode ? `<div class="mt-2 flex gap-2"><button data-action="toggle-visibility" data-id="${item.id}" class="rounded-md border border-white/20 px-2 py-1 text-[10px]">${hidden ? "Mostra" : "Nascondi"}</button><button data-action="assign-folder" data-id="${item.id}" data-folder="${folderId}" class="rounded-md border border-white/20 px-2 py-1 text-[10px]">Sposta</button></div>` : "";
-  return `<button data-item-index="${idx}" data-channel-id="${escapeHtml(item.id)}" class="media-card group relative w-44 shrink-0 overflow-hidden rounded-2xl border ${hidden ? "border-rose-500/50 opacity-60" : "border-white/10"} bg-premium-800/70 text-left transition-all duration-300 hover:-translate-y-1 hover:border-premium-accent/50 hover:shadow-glass"><div class="relative aspect-[2/3]">${icon ? `<img src="api/image?url=${encodeURIComponent(icon)}" alt="${escapeHtml(title)}" class="h-full w-full object-cover" loading="lazy" />` : `<div class="flex h-full w-full items-center justify-center bg-gradient-to-br from-premium-700 to-premium-600 text-xs tracking-[0.22em] text-slate-300">LIVE</div>`}<div class="absolute right-2 top-2 rounded-md bg-rose-600/90 px-2 py-0.5 text-[10px] font-semibold tracking-[0.12em] text-white">LIVE</div></div><div class="p-3"><h4 class="line-clamp-2 text-sm font-semibold text-slate-100">${escapeHtml(title)}</h4>${showTools}</div></button>`;
+function isFavorite(channelId) {
+  return (livePreferences.favoriteChannelIds || []).includes(String(channelId));
 }
 
-function renderLiveWithFolders(payload) {
+function allLiveChannels(payload) {
   const categories = normalizeCategories("live", payload);
-  const allChannels = categories.flatMap((cat) => cat.items);
-  const byId = new Map(allChannels.map((item) => [String(item.id), item]));
-  const hiddenIds = new Set((livePreferences.hiddenChannelIds || []).map(String));
+  return categories.flatMap((cat) => cat.items);
+}
 
-  const folders = livePreferences.folders || [];
-  const folderSections = folders.map((folder) => {
-    const items = (folder.channelIds || [])
-      .map((id) => byId.get(String(id)))
-      .filter(Boolean)
-      .filter((ch) => !hiddenIds.has(String(ch.id)));
-    return { id: folder.id, name: folder.name, items };
-  }).filter((f) => f.items.length > 0);
+function getFolderedLiveChannels(payload) {
+  const channels = allLiveChannels(payload);
+  const channelById = new Map(channels.map((ch) => [String(ch.id), ch]));
+  const visibleChannels = channels.filter((ch) => !isHidden(ch.id));
+  const favorites = visibleChannels.filter((ch) => isFavorite(ch.id));
+  const customFolders = (livePreferences.folders || []).map((folder) => ({
+    id: String(folder.id),
+    name: folder.name,
+    channels: (folder.channelIds || []).map((id) => channelById.get(String(id))).filter(Boolean).filter((ch) => !isHidden(ch.id))
+  }));
+  const assignedIds = new Set(customFolders.flatMap((f) => f.channels.map((ch) => String(ch.id))));
+  const uncategorized = visibleChannels.filter((ch) => !assignedIds.has(String(ch.id)));
+  const hidden = channels.filter((ch) => isHidden(ch.id));
+  return { channels, favorites, customFolders, uncategorized, hidden };
+}
 
-  const assigned = new Set(folderSections.flatMap((f) => f.items.map((c) => String(c.id))));
-  const unassigned = allChannels.filter((item) => !assigned.has(String(item.id)) && !hiddenIds.has(String(item.id)));
+function liveCard(item) {
+  const title = item.title || item.name || `Canale ${item.id}`;
+  const icon = item.icon || null;
+  const key = `live_${item.id}`;
+  renderedItems.set(key, item);
+  return `<article class="overflow-hidden rounded-2xl border border-white/10 bg-premium-800/70"><div class="relative aspect-[16/10]">${icon ? `<img src="api/image?url=${encodeURIComponent(icon)}" alt="${escapeHtml(title)}" class="h-full w-full object-cover" loading="lazy" />` : `<div class="flex h-full w-full items-center justify-center bg-gradient-to-br from-premium-700 to-premium-600 text-xs tracking-[0.22em] text-slate-300">LIVE</div>`}<div class="absolute right-2 top-2 rounded-md bg-rose-600/90 px-2 py-0.5 text-[10px] font-semibold tracking-[0.12em] text-white">LIVE</div></div><div class="space-y-2 p-3"><h4 class="line-clamp-2 text-sm font-semibold text-slate-100">${escapeHtml(title)}</h4><div class="flex flex-wrap gap-2"><button data-action="play" data-key="${key}" class="rounded-md border border-white/15 px-2 py-1 text-xs hover:bg-white/10">Guarda</button><button data-action="favorite" data-id="${item.id}" class="rounded-md border border-white/15 px-2 py-1 text-xs ${isFavorite(item.id) ? "text-amber-300" : ""}">★ Preferito</button>${liveManageMode ? `<button data-action="visibility" data-id="${item.id}" class="rounded-md border border-white/15 px-2 py-1 text-xs">${isHidden(item.id) ? "Mostra" : "Nascondi"}</button><button data-action="move" data-id="${item.id}" class="rounded-md border border-white/15 px-2 py-1 text-xs">Cartella</button>` : ""}</div></div></article>`;
+}
 
-  const toolbar = `<div class="glass rounded-2xl p-4"><div class="flex flex-wrap items-center gap-2"><button id="toggleManageMode" class="rounded-xl border border-white/20 px-3 py-2 text-xs">${liveManageMode ? "Disattiva gestione" : "Gestisci canali"}</button><button id="createFolderBtn" class="rounded-xl border border-white/20 px-3 py-2 text-xs">Nuova cartella</button><span class="text-xs text-slate-400">Canali totali: ${allChannels.length} · nascosti: ${hiddenIds.size}</span></div></div>`;
-
-  const sectionHtml = [];
-  for (const folder of folderSections) {
-    sectionHtml.push(`<section class="space-y-2"><h4 class="px-1 text-sm font-semibold uppercase tracking-[0.14em] text-slate-300">${escapeHtml(folder.name)}</h4><div class="flex gap-3 overflow-x-auto pb-2 pr-2">${folder.items.map((item, idx) => channelCard(item, idx, folder.id)).join("")}</div></section>`);
-  }
-  sectionHtml.push(`<section class="space-y-2"><h4 class="px-1 text-sm font-semibold uppercase tracking-[0.14em] text-slate-300">Canali non assegnati</h4><div class="flex gap-3 overflow-x-auto pb-2 pr-2">${unassigned.map((item, idx) => channelCard(item, idx, "")).join("")}</div></section>`);
-
-  posterGrid.className = "space-y-6";
-  posterGrid.innerHTML = `${toolbar}${sectionHtml.join("")}`;
-
-  Array.from(document.querySelectorAll(".media-card")).forEach((card) => {
-    card.addEventListener("click", (event) => {
-      const actionBtn = event.target.closest("button[data-action]");
-      if (actionBtn) {
-        event.preventDefault();
-        event.stopPropagation();
-        return;
-      }
-      const itemId = String(card.dataset.channelId || "");
-      const item = allChannels.find((ch) => String(ch.id) === itemId);
-      if (item) {
-        openPlayer(item);
-      }
+function bindDynamicActions(reRenderFn) {
+  Array.from(document.querySelectorAll("[data-action='play']")).forEach((btn) => {
+    btn.addEventListener("click", () => openPlayer(renderedItems.get(btn.dataset.key)));
+  });
+  Array.from(document.querySelectorAll("[data-action='favorite']")).forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = String(btn.dataset.id);
+      const set = new Set((livePreferences.favoriteChannelIds || []).map(String));
+      if (set.has(id)) set.delete(id); else set.add(id);
+      livePreferences.favoriteChannelIds = Array.from(set);
+      await saveLivePreferences();
+      reRenderFn();
     });
   });
-
-  const manageBtn = document.getElementById("toggleManageMode");
-  const createFolderBtn = document.getElementById("createFolderBtn");
-  if (manageBtn) {
-    manageBtn.addEventListener("click", () => {
-      liveManageMode = !liveManageMode;
-      renderLiveWithFolders(payload);
-    });
-  }
-  if (createFolderBtn) {
-    createFolderBtn.addEventListener("click", async () => {
-      const name = prompt("Nome cartella canali:");
-      if (!name) return;
-      livePreferences.folders = [...(livePreferences.folders || []), { id: `folder_${Date.now()}`, name: name.trim(), channelIds: [] }];
-      await saveLivePreferences();
-      renderLiveWithFolders(payload);
-    });
-  }
-
-  Array.from(document.querySelectorAll("button[data-action='toggle-visibility']")).forEach((btn) => {
-    btn.addEventListener("click", async (event) => {
-      event.preventDefault();
-      event.stopPropagation();
+  Array.from(document.querySelectorAll("[data-action='visibility']")).forEach((btn) => {
+    btn.addEventListener("click", async () => {
       const id = String(btn.dataset.id);
       const set = new Set((livePreferences.hiddenChannelIds || []).map(String));
       if (set.has(id)) set.delete(id); else set.add(id);
       livePreferences.hiddenChannelIds = Array.from(set);
       await saveLivePreferences();
-      renderLiveWithFolders(payload);
+      reRenderFn();
     });
   });
-
-  Array.from(document.querySelectorAll("button[data-action='assign-folder']")).forEach((btn) => {
-    btn.addEventListener("click", async (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const channelId = String(btn.dataset.id);
-      const name = prompt("Nome cartella destinazione (esistente o nuova):");
-      if (!name) return;
-      let folder = (livePreferences.folders || []).find((f) => f.name.toLowerCase() === name.trim().toLowerCase());
+  Array.from(document.querySelectorAll("[data-action='move']")).forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = String(btn.dataset.id);
+      const folderName = prompt("Nome cartella (esistente o nuova):");
+      if (!folderName) return;
+      let folder = (livePreferences.folders || []).find((f) => f.name.toLowerCase() === folderName.trim().toLowerCase());
       if (!folder) {
-        folder = { id: `folder_${Date.now()}`, name: name.trim(), channelIds: [] };
+        folder = { id: `folder_${Date.now()}`, name: folderName.trim(), channelIds: [] };
         livePreferences.folders.push(folder);
       }
       for (const f of livePreferences.folders) {
-        f.channelIds = (f.channelIds || []).filter((id) => String(id) !== channelId);
+        f.channelIds = (f.channelIds || []).filter((cid) => String(cid) !== id);
       }
-      folder.channelIds = [...new Set([...(folder.channelIds || []), channelId])];
+      folder.channelIds = [...new Set([...(folder.channelIds || []), id])];
       await saveLivePreferences();
-      renderLiveWithFolders(payload);
+      reRenderFn();
     });
   });
 }
 
-function renderShelfCards(section, payload) {
+function renderLiveSection(payload) {
+  renderedItems.clear();
+  const structured = getFolderedLiveChannels(payload);
+  const leftFolders = [
+    { id: "all", name: "Tutti", count: structured.uncategorized.length + structured.customFolders.reduce((sum, f) => sum + f.channels.length, 0) },
+    { id: "favorites", name: "Preferiti", count: structured.favorites.length },
+    ...structured.customFolders.map((f) => ({ id: f.id, name: f.name, count: f.channels.length })),
+    { id: "hidden", name: "Nascosti", count: structured.hidden.length }
+  ];
+  if (!leftFolders.some((f) => f.id === selectedLiveFolder)) {
+    selectedLiveFolder = "all";
+  }
+
+  let channelsToShow = [];
+  if (selectedLiveFolder === "all") {
+    channelsToShow = [...structured.customFolders.flatMap((f) => f.channels), ...structured.uncategorized];
+  } else if (selectedLiveFolder === "favorites") {
+    channelsToShow = structured.favorites;
+  } else if (selectedLiveFolder === "hidden") {
+    channelsToShow = structured.hidden;
+  } else {
+    channelsToShow = structured.customFolders.find((f) => f.id === selectedLiveFolder)?.channels || [];
+  }
+
+  posterGrid.className = "space-y-4";
+  posterGrid.innerHTML = `<div class="glass rounded-2xl p-4"><div class="flex flex-wrap items-center gap-2"><button id="toggleManageMode" class="rounded-xl border border-white/20 px-3 py-2 text-xs">${liveManageMode ? "Fine gestione" : "Gestisci canali"}</button><button id="newFolderBtn" class="rounded-xl border border-white/20 px-3 py-2 text-xs">Nuova cartella</button><span class="text-xs text-slate-400">Canali visualizzati: ${channelsToShow.length}</span></div></div><div class="grid gap-4 lg:grid-cols-[240px_1fr]"><aside class="glass rounded-2xl p-3"><div class="space-y-2">${leftFolders.map((folder) => `<button data-folder-id="${folder.id}" class="folder-btn w-full rounded-xl border px-3 py-2 text-left text-sm ${folder.id === selectedLiveFolder ? "border-premium-accent/60 bg-premium-accent/20" : "border-white/10 bg-white/5"}">${escapeHtml(folder.name)} <span class="float-right text-xs text-slate-400">${folder.count}</span></button>`).join("")}</div></aside><section class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">${channelsToShow.length ? channelsToShow.map((ch) => liveCard(ch)).join("") : `<div class="col-span-full glass rounded-2xl p-6 text-slate-300">Nessun canale in questa cartella.</div>`}</section></div>`;
+
+  Array.from(document.querySelectorAll(".folder-btn")).forEach((btn) => {
+    btn.addEventListener("click", () => {
+      selectedLiveFolder = btn.dataset.folderId;
+      renderLiveSection(payload);
+    });
+  });
+  const manage = document.getElementById("toggleManageMode");
+  const newFolder = document.getElementById("newFolderBtn");
+  if (manage) {
+    manage.addEventListener("click", () => {
+      liveManageMode = !liveManageMode;
+      renderLiveSection(payload);
+    });
+  }
+  if (newFolder) {
+    newFolder.addEventListener("click", async () => {
+      const name = prompt("Nome nuova cartella:");
+      if (!name) return;
+      livePreferences.folders = [...(livePreferences.folders || []), { id: `folder_${Date.now()}`, name: name.trim(), channelIds: [] }];
+      await saveLivePreferences();
+      renderLiveSection(payload);
+    });
+  }
+  bindDynamicActions(() => renderLiveSection(payload));
+}
+
+function mediaCard(item, section, key) {
+  const title = item.title || item.name || "Contenuto";
+  const poster = item.poster || item.icon || null;
+  renderedItems.set(key, item);
+  return `<article class="overflow-hidden rounded-2xl border border-white/10 bg-premium-800/70"><div class="relative aspect-[2/3]">${poster ? `<img src="api/image?url=${encodeURIComponent(poster)}" alt="${escapeHtml(title)}" class="h-full w-full object-cover" loading="lazy" />` : `<div class="flex h-full w-full items-center justify-center bg-gradient-to-br from-premium-700 to-premium-600 text-xs tracking-[0.2em]">${section === "vod" ? "FILM" : "SERIE"}</div>`}</div><div class="space-y-2 p-3"><h4 class="line-clamp-2 text-sm font-semibold text-slate-100">${escapeHtml(title)}</h4><button data-action="play" data-key="${key}" class="rounded-md border border-white/15 px-2 py-1 text-xs hover:bg-white/10">Guarda</button></div></article>`;
+}
+
+function renderVodSeries(section, payload) {
+  renderedItems.clear();
   const categories = normalizeCategories(section, payload).filter((c) => c.items.length > 0);
   if (!categories.length) {
     posterGrid.className = "space-y-6";
@@ -299,57 +360,77 @@ function renderShelfCards(section, payload) {
     return;
   }
   posterGrid.className = "space-y-6";
-  posterGrid.innerHTML = categories.map((category, catIdx) => {
-    const cards = category.items.map((item, idx) => {
-      const title = item.title || item.name || `Item ${item.id || ""}`;
-      const poster = item.poster || item.icon || null;
-      const tag = section === "vod" ? "FILM" : "SERIE";
-      return `<button data-cat="${catIdx}" data-idx="${idx}" class="shelf-card w-44 shrink-0 overflow-hidden rounded-2xl border border-white/10 bg-premium-800/70 text-left transition-all duration-300 hover:-translate-y-1 hover:border-premium-accent/50 hover:shadow-glass"><div class="relative aspect-[2/3]">${poster ? `<img src="api/image?url=${encodeURIComponent(poster)}" alt="${escapeHtml(title)}" class="h-full w-full object-cover" loading="lazy" />` : `<div class="flex h-full w-full items-center justify-center bg-gradient-to-br from-premium-700 to-premium-600 text-xs tracking-[0.22em] text-slate-300">${tag}</div>`}<div class="absolute inset-0 bg-gradient-to-t from-black/75 via-black/15 to-transparent"></div></div><div class="p-3"><h4 class="line-clamp-2 text-sm font-semibold text-slate-100">${escapeHtml(title)}</h4></div></button>`;
-    }).join("");
-    return `<section class="space-y-2"><h4 class="px-1 text-sm font-semibold uppercase tracking-[0.14em] text-slate-300">${escapeHtml(category.name)}</h4><div class="flex gap-3 overflow-x-auto pb-2 pr-2">${cards}</div></section>`;
+  posterGrid.innerHTML = categories.map((category) => {
+    const cards = category.items.map((item) => mediaCard(item, section, `${section}_${item.id}`)).join("");
+    return `<section class="space-y-2"><h4 class="px-1 text-sm font-semibold uppercase tracking-[0.14em] text-slate-300">${escapeHtml(category.name)}</h4><div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">${cards}</div></section>`;
   }).join("");
+  bindDynamicActions(() => {});
+}
 
-  Array.from(document.querySelectorAll(".shelf-card")).forEach((card) => {
-    card.addEventListener("click", () => {
-      const cat = Number(card.dataset.cat);
-      const idx = Number(card.dataset.idx);
-      const item = categories[cat].items[idx];
-      openPlayer(item);
-    });
-  });
+async function renderHome() {
+  setLoading("Caricamento preferiti...");
+  await loadLivePreferences();
+  if (!catalogCache.live) {
+    catalogCache.live = await apiFetch("api/live", { headers: { Accept: "application/json" } });
+  }
+  const channels = allLiveChannels(catalogCache.live);
+  const favorites = channels.filter((ch) => isFavorite(ch.id) && !isHidden(ch.id)).slice(0, 12);
+  renderedItems.clear();
+
+  let epgHtml = `<div class="glass rounded-2xl p-4 text-slate-300">Nessun preferito selezionato.</div>`;
+  if (favorites.length) {
+    const epgRows = await Promise.all(
+      favorites.slice(0, 8).map(async (ch) => {
+        try {
+          const epg = await apiFetch(`api/live/epg/${ch.id}?limit=2`);
+          const now = epg.listings?.[0]?.title || "N/D";
+          const next = epg.listings?.[1]?.title || "N/D";
+          return `<div class="rounded-xl border border-white/10 bg-black/25 px-3 py-2"><p class="text-xs text-slate-400">${escapeHtml(ch.name || ch.title)}</p><p class="text-sm text-slate-100">Ora: ${escapeHtml(now)}</p><p class="text-xs text-slate-300">Dopo: ${escapeHtml(next)}</p></div>`;
+        } catch {
+          return `<div class="rounded-xl border border-white/10 bg-black/25 px-3 py-2"><p class="text-xs text-slate-400">${escapeHtml(ch.name || ch.title)}</p><p class="text-sm text-rose-300">EPG non disponibile</p></div>`;
+        }
+      })
+    );
+    epgHtml = `<section class="space-y-2"><h4 class="text-sm font-semibold uppercase tracking-[0.14em] text-slate-300">EPG Preferiti</h4><div class="grid gap-2 md:grid-cols-2">${epgRows.join("")}</div></section>`;
+  }
+
+  const favoriteCards = favorites.length
+    ? favorites.map((ch) => liveCard({ ...ch, _section: "live", _playbackUrl: ch.streamUrl })).join("")
+    : `<div class="glass rounded-2xl p-4 text-slate-300">Aggiungi canali ai preferiti dalla sezione Live.</div>`;
+
+  posterGrid.className = "space-y-6";
+  posterGrid.innerHTML = `<section class="space-y-2"><h4 class="text-sm font-semibold uppercase tracking-[0.14em] text-slate-300">Preferiti</h4><div class="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">${favoriteCards}</div></section>${epgHtml}`;
+  bindDynamicActions(() => renderHome().catch(() => {}));
+}
+
+async function getCatalog(section) {
+  if (catalogCache[section]) {
+    return catalogCache[section];
+  }
+  const payload = await apiFetch(endpointBySection[section], { headers: { Accept: "application/json" } });
+  catalogCache[section] = payload;
+  return payload;
 }
 
 async function fetchSectionData(section) {
-  if (!endpointBySection[section]) {
-    apiStatus.textContent = "UI ready";
-    apiStatus.className = "mt-1 text-base font-medium text-emerald-300";
-    posterGrid.className = "space-y-6";
-    posterGrid.innerHTML = `<div class="glass rounded-2xl p-6 text-slate-300">Seleziona una libreria per vedere i contenuti.</div>`;
+  if (section === "home") {
+    await renderHome();
     return;
   }
-
-  apiStatus.textContent = "Caricamento...";
-  apiStatus.className = "mt-1 text-base font-medium text-amber-300";
-  setLoading();
-
-  try {
-    if (section === "live") {
-      await loadLivePreferences();
-    }
-    const payload = await apiFetch(endpointBySection[section], { headers: { Accept: "application/json" } });
-    catalogCache[section] = payload;
-    if (section === "live") {
-      renderLiveWithFolders(payload);
-    } else {
-      renderShelfCards(section, payload);
-    }
-    apiStatus.textContent = "Online";
-    apiStatus.className = "mt-1 text-base font-medium text-emerald-300";
-  } catch (error) {
-    apiStatus.textContent = "Errore API";
-    apiStatus.className = "mt-1 text-base font-medium text-rose-300";
+  if (!endpointBySection[section]) {
     posterGrid.className = "space-y-6";
-    posterGrid.innerHTML = `<div class="glass rounded-2xl p-6 text-rose-300">Errore caricamento API: ${escapeHtml(error.message)}</div>`;
+    posterGrid.innerHTML = `<div class="glass rounded-2xl p-6 text-slate-300">Sezione non disponibile.</div>`;
+    return;
+  }
+  setLoading();
+  if (section === "live") {
+    await loadLivePreferences();
+  }
+  const payload = await getCatalog(section);
+  if (section === "live") {
+    renderLiveSection(payload);
+  } else {
+    renderVodSeries(section, payload);
   }
 }
 
@@ -399,33 +480,62 @@ async function saveSettings(event) {
     });
     appSettings = body.settings;
     fillSettingsForm(body.settings);
+    catalogCache = { live: null, vod: null, series: null };
     settingsStatus.textContent = "Salvato con successo";
   } catch (error) {
     settingsStatus.textContent = `Errore salvataggio: ${error.message}`;
   }
 }
 
-function handleSection(section) {
+async function handleSection(section) {
+  currentSection = section;
   const meta = sectionMeta[section] || sectionMeta.home;
   gridTitle.textContent = meta.title;
   heroDescription.textContent = meta.description;
   setActiveSection(section);
   settingsPanel.classList.toggle("hidden", section !== "settings");
+  apiStatus.textContent = "Caricamento...";
+  apiStatus.className = "mt-1 text-base font-medium text-amber-300";
 
-  if (section === "settings") {
+  try {
+    if (section === "settings") {
+      posterGrid.className = "space-y-6";
+      posterGrid.innerHTML = "";
+      await loadSettings();
+    } else {
+      await fetchSectionData(section);
+    }
+    apiStatus.textContent = "Online";
+    apiStatus.className = "mt-1 text-base font-medium text-emerald-300";
+  } catch (error) {
+    apiStatus.textContent = "Errore API";
+    apiStatus.className = "mt-1 text-base font-medium text-rose-300";
     posterGrid.className = "space-y-6";
-    posterGrid.innerHTML = "";
-    loadSettings();
-    return;
+    posterGrid.innerHTML = `<div class="glass rounded-2xl p-6 text-rose-300">Errore: ${escapeHtml(error.message)}</div>`;
   }
-  fetchSectionData(section);
 }
 
-navItems.forEach((btn) => btn.addEventListener("click", () => handleSection(btn.dataset.section)));
+navItems.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    handleSection(btn.dataset.section);
+  });
+});
 settingsForm.addEventListener("submit", saveSettings);
 closePlayerBtn.addEventListener("click", closePlayer);
 playerModal.addEventListener("click", (event) => {
-  if (event.target === playerModal) closePlayer();
+  if (event.target === playerModal) {
+    closePlayer();
+  }
+});
+videoPlayer.addEventListener("error", () => {
+  if (!fallbackTried && currentSection === "live") {
+    const src = videoPlayer.currentSrc || "";
+    const fallback = buildM3u8Fallback(src);
+    if (fallback) {
+      fallbackTried = true;
+      attachNativePlayer(fallback);
+    }
+  }
 });
 
 handleSection("home");

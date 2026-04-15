@@ -19,7 +19,8 @@ const DEFAULT_PLAYBACK_SETTINGS = {
 };
 const DEFAULT_LIVE_PREFERENCES = {
   hiddenChannelIds: [],
-  folders: []
+  folders: [],
+  favoriteChannelIds: []
 };
 
 app.use(cors());
@@ -40,6 +41,13 @@ let sessionCache = {
   checkedAt: 0,
   profile: null
 };
+const responseCache = new Map();
+const CACHE_TTL_MS = {
+  live: 90_000,
+  vod: 180_000,
+  series: 300_000,
+  epg: 30_000
+};
 
 function parseBaseUrl(rawUrl) {
   if (!rawUrl || typeof rawUrl !== "string") {
@@ -51,6 +59,29 @@ function parseBaseUrl(rawUrl) {
     return `http://${normalized}`;
   }
   return normalized;
+}
+
+function getCached(key) {
+  const entry = responseCache.get(key);
+  if (!entry) {
+    return null;
+  }
+  if (Date.now() > entry.expiresAt) {
+    responseCache.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+
+function setCached(key, value, ttlMs) {
+  responseCache.set(key, {
+    value,
+    expiresAt: Date.now() + ttlMs
+  });
+}
+
+function clearResponseCache() {
+  responseCache.clear();
 }
 
 function loadOptions() {
@@ -141,6 +172,9 @@ function normalizeLivePreferences(input = {}) {
   const hiddenChannelIds = Array.isArray(input.hiddenChannelIds)
     ? [...new Set(input.hiddenChannelIds.map((id) => String(id)))]
     : [];
+  const favoriteChannelIds = Array.isArray(input.favoriteChannelIds)
+    ? [...new Set(input.favoriteChannelIds.map((id) => String(id)))]
+    : [];
   const folders = Array.isArray(input.folders)
     ? input
         .map((folder) => ({
@@ -155,7 +189,8 @@ function normalizeLivePreferences(input = {}) {
 
   return {
     hiddenChannelIds,
-    folders
+    folders,
+    favoriteChannelIds
   };
 }
 
@@ -396,6 +431,10 @@ app.get("/api/health", async (_req, res, next) => {
 
 app.get("/api/live", async (_req, res, next) => {
   try {
+    const cached = getCached("api_live");
+    if (cached) {
+      return res.json(cached);
+    }
     const cfg = requireConfig();
     await ensureAuthenticated();
     const [categoriesRaw, streamsRaw] = await Promise.all([
@@ -406,10 +445,12 @@ app.get("/api/live", async (_req, res, next) => {
     const channels = (streamsRaw || []).map((channel) => mapLiveChannel(channel, cfg));
     const categories = groupByCategory(channels, categoriesRaw, "categoryId");
 
-    res.json({
+    const payload = {
       categories,
       totalChannels: channels.length
-    });
+    };
+    setCached("api_live", payload, CACHE_TTL_MS.live);
+    res.json(payload);
   } catch (error) {
     next(error);
   }
@@ -428,6 +469,7 @@ app.put("/api/live/preferences", (req, res, next) => {
       ...cfg,
       livePreferences: incoming
     });
+    clearResponseCache();
     res.json({ ok: true, livePreferences: incoming });
   } catch (error) {
     next(error);
@@ -439,6 +481,11 @@ app.get("/api/live/epg/:streamId", async (req, res, next) => {
     await ensureAuthenticated();
     const streamId = req.params.streamId;
     const limit = Number(req.query.limit || 8);
+    const cacheKey = `api_live_epg_${streamId}_${limit}`;
+    const cached = getCached(cacheKey);
+    if (cached) {
+      return res.json(cached);
+    }
     const raw = await xtreamPlayerApi("get_short_epg", {
       stream_id: streamId,
       limit: Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 24) : 8
@@ -457,10 +504,12 @@ app.get("/api/live/epg/:streamId", async (req, res, next) => {
       };
     });
 
-    res.json({
+    const payload = {
       streamId: String(streamId),
       listings
-    });
+    };
+    setCached(cacheKey, payload, CACHE_TTL_MS.epg);
+    res.json(payload);
   } catch (error) {
     next(error);
   }
@@ -468,6 +517,10 @@ app.get("/api/live/epg/:streamId", async (req, res, next) => {
 
 app.get("/api/vod", async (_req, res, next) => {
   try {
+    const cached = getCached("api_vod");
+    if (cached) {
+      return res.json(cached);
+    }
     const cfg = requireConfig();
     await ensureAuthenticated();
     const [categoriesRaw, vodRaw] = await Promise.all([
@@ -478,10 +531,12 @@ app.get("/api/vod", async (_req, res, next) => {
     const movies = (vodRaw || []).map((movie) => mapVodMovie(movie, cfg));
     const categories = groupByCategory(movies, categoriesRaw, "categoryId");
 
-    res.json({
+    const payload = {
       categories,
       totalMovies: movies.length
-    });
+    };
+    setCached("api_vod", payload, CACHE_TTL_MS.vod);
+    res.json(payload);
   } catch (error) {
     next(error);
   }
@@ -489,6 +544,10 @@ app.get("/api/vod", async (_req, res, next) => {
 
 app.get("/api/series", async (_req, res, next) => {
   try {
+    const cached = getCached("api_series");
+    if (cached) {
+      return res.json(cached);
+    }
     await ensureAuthenticated();
     const [categoriesRaw, seriesRaw] = await Promise.all([
       xtreamPlayerApi("get_series_categories"),
@@ -499,10 +558,12 @@ app.get("/api/series", async (_req, res, next) => {
     const hydrated = await hydrateSeriesStructure(mappedSeries);
     const categories = groupByCategory(hydrated, categoriesRaw, "categoryId");
 
-    res.json({
+    const payload = {
       categories,
       totalSeries: hydrated.length
-    });
+    };
+    setCached("api_series", payload, CACHE_TTL_MS.series);
+    res.json(payload);
   } catch (error) {
     next(error);
   }
@@ -532,6 +593,7 @@ app.put("/api/settings", async (req, res, next) => {
     };
     saveRuntimeSettings(merged);
     sessionCache = { checkedAt: 0, profile: null };
+    clearResponseCache();
     await ensureAuthenticated(true);
     res.json({ ok: true, settings: publicSettingsFromConfig(getEffectiveConfig()) });
   } catch (error) {
