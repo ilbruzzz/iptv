@@ -18,6 +18,7 @@ RUN cd /app/backend && npm install --omit=dev
 
 # Copy add-on files
 COPY backend /app/backend
+COPY frontend /app/frontend
 COPY run.sh /run.sh
 RUN chmod a+x /run.sh
 

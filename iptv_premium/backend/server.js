@@ -1,4 +1,5 @@
 const fs = require("fs");
+const path = require("path");
 const express = require("express");
 const cors = require("cors");
 const morgan = require("morgan");
@@ -7,6 +8,7 @@ const axios = require("axios");
 const app = express();
 const PORT = Number(process.env.PORT || 8099);
 const OPTIONS_PATH = "/data/options.json";
+const FRONTEND_DIR = path.resolve(__dirname, "..", "frontend");
 
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
@@ -369,6 +371,17 @@ app.get("/api/image", async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+app.use(express.static(FRONTEND_DIR));
+app.get("/", (_req, res) => {
+  res.sendFile(path.join(FRONTEND_DIR, "index.html"));
+});
+app.get("*", (req, res, next) => {
+  if (req.path.startsWith("/api/") || req.path.startsWith("/live/")) {
+    return next();
+  }
+  res.sendFile(path.join(FRONTEND_DIR, "index.html"));
 });
 
 app.use((error, _req, res, _next) => {
